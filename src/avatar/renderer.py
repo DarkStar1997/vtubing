@@ -7,6 +7,7 @@ from pathlib import Path
 import moderngl
 import numpy as np
 from PIL import Image
+from scipy.spatial.transform import Rotation
 
 from src.avatar.gltf_utils import compute_world_matrices, decode_accessor, decode_texture
 from src.avatar.shaders import FRAGMENT_SHADER, VERTEX_SHADER
@@ -52,6 +53,7 @@ class _Prim:
     texture: moderngl.Texture | None
     render_order: int
     depth_write: bool
+    node_idx: int
     mat_name: str | None = None
 
 
@@ -104,6 +106,9 @@ class VRMRenderer:
         self.prog = self.ctx.program(vertex_shader=VERTEX_SHADER, fragment_shader=FRAGMENT_SHADER)
 
         self.world = compute_world_matrices(model.nodes)
+        self._neutral_world = [w.copy() for w in self.world]
+        self._bone_overrides: dict[int, np.ndarray] = {}
+        self._cached_skin_data: dict[int, tuple[list[int], np.ndarray]] = {}
         self._identity_ubo = self.ctx.buffer(
             np.repeat(np.eye(4, dtype=np.float32)[None], MAX_JOINTS, 0).tobytes()
         )
@@ -115,7 +120,10 @@ class VRMRenderer:
         }
 
         head = model.humanoid_bone_by_name.get("head")
-        self.head_pos = self.world[head][:3, 3].copy() if head is not None else np.array([0, 1.5, 0], np.float32)
+        self.head_node = head
+        self.left_eye_node = model.humanoid_bone_by_name.get("leftEye")
+        self.right_eye_node = model.humanoid_bone_by_name.get("rightEye")
+        self.head_pos = self._neutral_world[head][:3, 3].copy() if head is not None else np.array([0, 1.5, 0], np.float32)
 
     def _build_skins(self) -> dict[int, moderngl.Buffer]:
         gltf = self.model.gltf
@@ -124,6 +132,7 @@ class VRMRenderer:
             joints = list(sk.joints)
             ibm = decode_accessor(gltf, sk.inverseBindMatrices, as_float=False).astype(np.float32).reshape(-1, 4, 4)
             ibm = ibm.transpose(0, 2, 1)  # glTF stores matrices column-major; transpose to row-major
+            self._cached_skin_data[si] = (joints, ibm)
             jm = np.stack([self.world[j] @ ibm[k] for k, j in enumerate(joints)]).astype(np.float32)
             jm = jm.transpose(0, 2, 1)  # row-major -> column-major for std140
             padded = np.repeat(np.eye(4, dtype=np.float32)[None], MAX_JOINTS, 0)
@@ -205,7 +214,7 @@ class VRMRenderer:
                     skin_idx=skin_idx, morph_count=morph_count, vert_count=vcount,
                     morph_deltas=morph_deltas, morph_ssbo=morph_ssbo,
                     has_tex=has_tex, base_color=base_color, texture=texture,
-                    render_order=rorder, depth_write=dwrite, mat_name=mat_name,
+                    render_order=rorder, depth_write=dwrite, node_idx=ni, mat_name=mat_name,
                 ))
         return prims
 
@@ -240,8 +249,80 @@ class VRMRenderer:
         if arr is not None and target_idx < len(arr):
             arr[target_idx] = weight
 
+    def set_expression_weights(self, weights: dict[str, float]) -> None:
+        self.clear_expressions()
+        for name, weight in weights.items():
+            if weight <= 0.0:
+                continue
+            expr = self.model.expression_by_name.get(name)
+            if expr is None:
+                continue
+            for bind in expr.morph_binds:
+                node = self.model.nodes[bind.node]
+                if node.mesh is None:
+                    continue
+                arr = self._mesh_weights.get(node.mesh)
+                if arr is not None and bind.index < len(arr):
+                    arr[bind.index] = max(arr[bind.index], bind.weight * weight)
+
+    def set_bone_rotation(self, node_idx: int, quaternion: np.ndarray) -> None:
+        self._bone_overrides[node_idx] = np.asarray(quaternion, dtype=np.float32)
+
+    def clear_bone_overrides(self) -> None:
+        self._bone_overrides.clear()
+
+    def apply_rig_state(self, state: dict) -> None:
+        self.set_expression_weights(state.get("expressions", {}))
+        self.clear_bone_overrides()
+        head_delta = state.get("head_delta")
+        if head_delta is not None and self.head_node is not None:
+            q = self._compute_head_bone_quat(head_delta)
+            self.set_bone_rotation(self.head_node, q)
+        yaw = state.get("eye_yaw", 0.0)
+        pitch = state.get("eye_pitch", 0.0)
+        if yaw != 0.0 or pitch != 0.0:
+            for eye_node in (self.left_eye_node, self.right_eye_node):
+                if eye_node is not None:
+                    q = self._compute_eye_bone_quat(yaw, pitch, eye_node)
+                    self.set_bone_rotation(eye_node, q)
+
+    def _compute_head_bone_quat(self, delta_rot: np.ndarray) -> np.ndarray:
+        head_node = self.model.nodes[self.head_node]
+        orig_rot = Rotation.from_quat(head_node.rotation).as_matrix()
+        parent_idx = head_node.parent
+        if parent_idx is not None:
+            parent_rot = self._neutral_world[parent_idx][:3, :3]
+        else:
+            parent_rot = np.eye(3, dtype=np.float32)
+        local_delta = parent_rot.T @ delta_rot @ parent_rot
+        new_rot = local_delta @ orig_rot
+        return Rotation.from_matrix(new_rot).as_quat().astype(np.float32)
+
+    def _compute_eye_bone_quat(self, yaw_deg: float, pitch_deg: float, node_idx: int) -> np.ndarray:
+        # positive yaw = right -> negative Y rotation
+        # positive pitch = up -> positive X rotation
+        rot = Rotation.from_euler("YX", [-yaw_deg, pitch_deg], degrees=True)
+        rot_mat = rot.as_matrix()
+        eye_node = self.model.nodes[node_idx]
+        orig_rot = Rotation.from_quat(eye_node.rotation).as_matrix()
+        new_rot = rot_mat @ orig_rot
+        return Rotation.from_matrix(new_rot).as_quat().astype(np.float32)
+
+    def _update_transforms(self) -> None:
+        self.world = compute_world_matrices(self.model.nodes, self._bone_overrides)
+        for si, (joints, ibm) in self._cached_skin_data.items():
+            jm = np.stack([self.world[j] @ ibm[k] for k, j in enumerate(joints)]).astype(np.float32)
+            jm = jm.transpose(0, 2, 1)
+            padded = np.repeat(np.eye(4, dtype=np.float32)[None], MAX_JOINTS, 0)
+            padded[: len(jm)] = jm
+            self._skin_ubos[si].write(padded.tobytes())
+        for prim in self.primitives:
+            prim.model = self.world[prim.node_idx]
+
     def render(self) -> np.ndarray:
         self._default_camera()
+        if self._bone_overrides:
+            self._update_transforms()
         self.fbo.clear(0.05, 0.05, 0.08, 1.0)
         self.fbo.use()
         self.prog["u_proj"].write(_mat4_col_major(self._proj))
@@ -291,23 +372,46 @@ class VRMRenderer:
 
 def main() -> None:
     import sys
+    from scipy.spatial.transform import Rotation
+
+    from src.rig.solver import RigSolver
+
     vrm_path = sys.argv[1] if len(sys.argv) > 1 else "assets/avatars/sample.vrm"
-    out = sys.argv[2] if len(sys.argv) > 2 else "output/m3_nomorph.png"
+    out = sys.argv[2] if len(sys.argv) > 2 else "output/m4_neutral.png"
     model = load_vrm(vrm_path)
     r = VRMRenderer(model, 1280, 720)
+    solver = RigSolver(model)
+    dt = 1.0 / 30.0
     Path(out).parent.mkdir(parents=True, exist_ok=True)
 
-    # Render WITHOUT morph
-    r.clear_expressions()
-    r.render_to_file(out)
-    print(f"wrote {out}  (morph OFF)")
+    def _rig(yaw=0.0, pitch=0.0, roll=0.0, bs=None):
+        rot = Rotation.from_euler("YXZ", [yaw, pitch, roll], degrees=True)
+        m = np.eye(4, dtype=np.float32)
+        m[:3, :3] = rot.as_matrix().astype(np.float32)
+        return {"detected": True, "blendshapes": bs or {}, "matrix": m,
+                "euler": np.array([yaw, pitch, roll], dtype=np.float32)}
 
-    # Render WITH 'aa' expression
-    out2 = str(Path(out).with_name(Path(out).stem + "_aa.png"))
-    r.clear_expressions()
-    r.apply_expression("aa", 1.0)
-    r.render_to_file(out2)
-    print(f"wrote {out2}  (expression 'aa')")
+    # Calibrate
+    for _ in range(35):
+        solver.update(_rig(), dt)
+
+    # Neutral
+    state = solver.update(_rig(), dt)
+    r.apply_rig_state(state)
+    r.render_to_file(out)
+    print(f"wrote {out}  (neutral)")
+
+    # 'aa' expression
+    state = solver.update(_rig(bs={"jawOpen": 0.7}), dt)
+    r.apply_rig_state(state)
+    r.render_to_file(str(Path(out).with_name(Path(out).stem + "_aa.png")))
+    print(f"wrote {Path(out).stem}_aa.png  (jawOpen=0.7)")
+
+    # Head rotation
+    state = solver.update(_rig(yaw=20, pitch=10), dt)
+    r.apply_rig_state(state)
+    r.render_to_file(str(Path(out).with_name(Path(out).stem + "_head.png")))
+    print(f"wrote {Path(out).stem}_head.png  (yaw=20 pitch=10)")
 
 
 if __name__ == "__main__":

@@ -12,8 +12,24 @@ tracking:
   min_detection_confidence: 0.5
   min_tracking_confidence: 0.5
 
+rig:
+  calibration:
+    frames: 30          # ~1 s at 30 fps; auto-captures neutral pose
+  blendshape:
+    min_cutoff: 3.0     # higher = less smoothing
+    beta: 0.0           # speed coefficient (0 = no adaptation)
+  head:
+    min_cutoff: 1.5     # lower = more smoothing at rest
+    beta: 0.05          # responsiveness to fast head movement
+  gaze:
+    min_cutoff: 3.0
+    beta: 0.0
+
 output:
   width: 1280
   height: 720
   fps: 30          # 30 default; set to 60 for smoother output
   sink: preview    # preview | file | vcam
+  # file_path: output/session.mp4   # used when sink: file
+  # vcam:
+  #   backend: obs    # obs | unity | v4l2loopback

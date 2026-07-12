@@ -23,6 +23,6 @@ assets/models/*.task
 *.gltf
 
 # Output artifacts
-output/
+/output/
 *.mp4
 *.avi

@@ -133,15 +133,24 @@ def trs_to_mat4(translation, rotation, scale) -> np.ndarray:
     return (T @ R @ S).astype(np.float32)
 
 
-def compute_world_matrices(nodes) -> list[np.ndarray]:
-    """Compute bind-pose world matrices for every node (parent TRS accumulation)."""
+def compute_world_matrices(
+    nodes,
+    rotation_overrides: dict[int, np.ndarray] | None = None,
+) -> list[np.ndarray]:
+    """Compute world matrices for every node (parent TRS accumulation).
+
+    If *rotation_overrides* is provided, the given node indices use the
+    quaternion [x, y, z, w] instead of the node's original rotation.
+    """
     world: list[np.ndarray | None] = [None] * len(nodes)
+    overrides = rotation_overrides or {}
 
     def get(i: int) -> np.ndarray:
         if world[i] is not None:
             return world[i]
         n = nodes[i]
-        local = trs_to_mat4(n.translation, n.rotation, n.scale)
+        rot = overrides.get(i, n.rotation)
+        local = trs_to_mat4(n.translation, rot, n.scale)
         if n.parent is not None:
             world[i] = get(n.parent) @ local
         else:
