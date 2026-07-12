@@ -1,0 +1,15 @@
+[project]
+name = "vtubing-pipeline"
+version = "0.1.0"
+description = "Lightweight open-source VTubing pipeline: webcam -> MediaPipe -> VRM avatar -> virtual camera"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "opencv-python>=4.8",
+    "mediapipe>=0.10.14",
+    "numpy>=1.26",
+    "moderngl>=5.8",
+    "pygltflib>=1.16",
+    "pyvirtualcam>=0.10",
+    "pyyaml>=6.0",
+    "scipy>=1.11",
+]

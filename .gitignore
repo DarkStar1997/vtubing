@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# uv / venv
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Project binaries (downloaded / provided separately)
+assets/models/*.task
+*.vrm
+*.glb
+*.gltf
+
+# Output artifacts
+output/
+*.mp4
+*.avi
