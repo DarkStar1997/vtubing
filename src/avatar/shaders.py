@@ -15,6 +15,7 @@ uniform mat4 u_view;
 uniform mat4 u_model;
 uniform int u_morph_count;
 uniform int u_vert_count;
+uniform float u_depth_bias;
 
 out vec3 v_normal;
 out vec2 v_uv;
@@ -36,6 +37,7 @@ void main() {
     v_normal = normalize(mat3(u_model) * mat3(skin) * a_normal);
     v_uv = a_uv;
     gl_Position = u_proj * u_view * world;
+    gl_Position.z -= u_depth_bias * gl_Position.w;
 }
 """
 

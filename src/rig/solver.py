@@ -209,6 +209,9 @@ class RigSolver:
         delta_rot = self._neutral_head_rot.T @ head_rot
         # Filter as Euler angles (YXZ = yaw, pitch, roll)
         euler = Rotation.from_matrix(delta_rot).as_euler("YXZ", degrees=True)
+        # MediaPipe sees the user from the front; the avatar should mimic the
+        # user as seen by the camera (non-mirrored).  This inverts yaw only.
+        euler[0] = -euler[0]
         euler_f = np.array([
             self._head_filters[0].filter(euler[0], dt),
             self._head_filters[1].filter(euler[1], dt),

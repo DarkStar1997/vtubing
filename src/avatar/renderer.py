@@ -52,7 +52,6 @@ class _Prim:
     base_color: np.ndarray
     texture: moderngl.Texture | None
     render_order: int
-    depth_write: bool
     node_idx: int
     mat_name: str | None = None
 
@@ -99,6 +98,8 @@ class VRMRenderer:
         self.height = height
         self.ctx = moderngl.create_standalone_context()
         self.ctx.enable(moderngl.DEPTH_TEST)
+        self.ctx.enable(moderngl.CULL_FACE)
+        self.ctx.front_face = 'ccw'
         self._color_tex = self.ctx.texture((width, height), 4)
         self._depth_tex = self.ctx.depth_texture((width, height))
         self.fbo = self.ctx.framebuffer(self._color_tex, self._depth_tex)
@@ -204,17 +205,17 @@ class VRMRenderer:
                 mat_name = getattr(mat, "name", None) if mat is not None else None
                 tag = (mat_name.split("_")[-1].upper() if mat_name else "")
                 if morph_count > 0:
-                    rorder, dwrite = 2, True
+                    rorder = 2
                 elif tag in _HAIR_TAGS:
-                    rorder, dwrite = 1, False
+                    rorder = 1
                 else:
-                    rorder, dwrite = 0, True
+                    rorder = 0
                 prims.append(_Prim(
                     vao=vao, index_count=idx.size, model=model_mat, mesh_idx=node.mesh,
                     skin_idx=skin_idx, morph_count=morph_count, vert_count=vcount,
                     morph_deltas=morph_deltas, morph_ssbo=morph_ssbo,
                     has_tex=has_tex, base_color=base_color, texture=texture,
-                    render_order=rorder, depth_write=dwrite, node_idx=ni, mat_name=mat_name,
+                    render_order=rorder, node_idx=ni, mat_name=mat_name,
                 ))
         return prims
 
@@ -352,16 +353,23 @@ class VRMRenderer:
                 self._identity_ubo.bind_to_uniform_block(0)
             self.prog["u_has_tex"].value = 1 if prim.has_tex else 0
             self.prog["u_base_color"].value = tuple(prim.base_color.tolist())
+            if "u_depth_bias" in self.prog:
+                self.prog["u_depth_bias"].value = 0.0
             if prim.texture is not None:
                 prim.texture.use(0)
-            self.ctx.depth_mask = prim.depth_write
+            self.ctx.depth_mask = True
             if prim.render_order == 2:
                 self.ctx.disable(moderngl.DEPTH_TEST)
             else:
                 self.ctx.enable(moderngl.DEPTH_TEST)
+            if prim.render_order == 0:
+                self.ctx.disable(moderngl.CULL_FACE)
+            else:
+                self.ctx.enable(moderngl.CULL_FACE)
             prim.vao.render(moderngl.TRIANGLES, vertices=prim.index_count)
         self.ctx.depth_mask = True
         self.ctx.enable(moderngl.DEPTH_TEST)
+        self.ctx.enable(moderngl.CULL_FACE)
         data = self.fbo.read(components=3, alignment=1)
         return np.frombuffer(data, np.uint8).reshape(self.height, self.width, 3)
 
