@@ -93,14 +93,9 @@ async function loadVRM(url) {
   const gltf = await loader.loadAsync(url);
   vrm = gltf.userData.vrm;
   VRMUtils.removeUnnecessaryVertices(vrm.scene);
-  VRMUtils.combineSkeletons(vrm.scene);
   scene.add(vrm.scene);
   for (const k of Object.keys(_BONE_CACHE)) delete _BONE_CACHE[k];
   _framingApplied = false;
-
-  // Debug: log head bone rest rotation
-  const _hd = vrm.humanoid?.getNormalizedBoneNode("head");
-  if (_hd) console.log("[dbg] head rest rot:", _hd.rotation.x.toFixed(3), _hd.rotation.y.toFixed(3), _hd.rotation.z.toFixed(3));
 
   // Centre + frame the model — bust shot (head to chest), webcam from above
   const box = new THREE.Box3().setFromObject(vrm.scene);
@@ -252,26 +247,28 @@ function applyRig(rig) {
 }
 
 // ---------------------------------------------------------------------------
-// Hand finger curl application
+// Hand tracking: wrist orientation + per-joint finger angles
 // ---------------------------------------------------------------------------
 const _FINGER_NAMES = ["thumb", "index", "middle", "ring", "little"];
 const _HAND_BONES = {
   left: {
-    thumb:  ["leftThumbProximal", "leftThumbDistal"],
+    thumb:  ["leftThumbMetacarpal", "leftThumbProximal", "leftThumbDistal"],
     index:  ["leftIndexProximal", "leftIndexIntermediate", "leftIndexDistal"],
     middle: ["leftMiddleProximal", "leftMiddleIntermediate", "leftMiddleDistal"],
     ring:   ["leftRingProximal", "leftRingIntermediate", "leftRingDistal"],
     little: ["leftLittleProximal", "leftLittleIntermediate", "leftLittleDistal"],
   },
   right: {
-    thumb:  ["rightThumbProximal", "rightThumbDistal"],
+    thumb:  ["rightThumbMetacarpal", "rightThumbProximal", "rightThumbDistal"],
     index:  ["rightIndexProximal", "rightIndexIntermediate", "rightIndexDistal"],
     middle: ["rightMiddleProximal", "rightMiddleIntermediate", "rightMiddleDistal"],
     ring:   ["rightRingProximal", "rightRingIntermediate", "rightRingDistal"],
     little: ["rightLittleProximal", "rightLittleIntermediate", "rightLittleDistal"],
   },
 };
-const _MAX_CURL_RAD = 1.1;
+// Max flexion angle per joint position [proximal, intermediate, distal] (radians)
+const _JOINT_MAX_RAD = [3.0, 3.2, 2.2];
+const _THUMB_JOINT_MAX_RAD = [1.5, 2.0, 2.0];
 const _BONE_CACHE = {};
 
 function _getBone(name) {
@@ -286,12 +283,22 @@ function _applyHands(hands) {
   for (const side of ["left", "right"]) {
     const hand = hands?.[side];
     const sign = side === "left" ? -1 : 1;
-    for (let i = 0; i < _FINGER_NAMES.length; i++) {
-      const curl = hand?.curls?.[i] ?? 0;
-      const angle = sign * curl * _MAX_CURL_RAD;
-      for (const boneName of _HAND_BONES[side][_FINGER_NAMES[i]]) {
-        const bone = _getBone(boneName);
-        if (bone) bone.rotation.z = angle;
+
+    // Per-joint finger angles
+    for (const fingerName of _FINGER_NAMES) {
+      const bones = _HAND_BONES[side][fingerName];
+      const angles = hand?.fingers?.[fingerName] ?? [];
+      const maxAngles = fingerName === "thumb" ? _THUMB_JOINT_MAX_RAD : _JOINT_MAX_RAD;
+      for (let j = 0; j < bones.length; j++) {
+        const bone = _getBone(bones[j]);
+        if (!bone) continue;
+        const flex = angles[j] ?? 0;
+        const angle = sign * flex * (maxAngles[j] ?? 1.1);
+        if (fingerName === "thumb") {
+          bone.rotation.set(0, -angle, 0);
+        } else {
+          bone.rotation.set(0, 0, angle);
+        }
       }
     }
   }

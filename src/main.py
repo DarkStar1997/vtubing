@@ -122,13 +122,23 @@ def _state_to_ws(state: dict, hands: dict | None = None, pose: dict | None = Non
         math.radians(float(state.get("eye_pitch", 0.0))),
     ]
 
+    # Strip internal keys (prefixed with _) from hands before sending
+    clean_hands = None
+    if hands:
+        clean_hands = {}
+        for side, h in hands.items():
+            if h is None:
+                clean_hands[side] = None
+            else:
+                clean_hands[side] = {k: v for k, v in h.items() if not k.startswith("_")}
+
     return {
         "detected": bool(state.get("detected", False)),
         "calibrated": bool(state.get("calibrated", False)),
         "expressions": {k: float(v) for k, v in state.get("expressions", {}).items()},
         "head": head,
         "gaze": gaze,
-        "hands": hands,
+        "hands": clean_hands,
         "pose": pose,
         "framing": framing,
     }
@@ -229,7 +239,7 @@ def main() -> None:
                     last_hands = extract_hands(hand_result)
                     last_hand_result = hand_result
                     pose_result = pose_tracker.detect(rgb_buf, ts + 2)
-                    last_pose = pose_tracker.extract_angles(pose_result, target_dt)
+                    last_pose = pose_tracker.extract_angles(pose_result, target_dt, last_hands)
                     last_pose_result = pose_result
 
                     # Collect framing data during calibration
@@ -288,13 +298,17 @@ def main() -> None:
             fps = frame_count / elapsed if elapsed > 0 else 0.0
             status = "calibrated" if solver.is_calibrated else "calibrating"
             pose_tag = "pose" if last_pose else "no-pose"
+            hand_tag = "hands:" + "".join(
+                s[0].upper() if last_hands and last_hands.get(s) else "-"
+                for s in ["left", "right"]
+            )
             if state["detected"]:
                 exprs = state.get("expressions", {})
                 top = sorted(exprs.items(), key=lambda kv: -kv[1])[:3]
                 expr_str = " ".join(f"{n}={v:.2f}" for n, v in top if v > 0.01)
-                line = f"[{fps:4.1f}fps {status:11s} {pose_tag:8s}] {expr_str}"
+                line = f"[{fps:4.1f}fps {status:11s} {pose_tag:8s} {hand_tag:8s}] {expr_str}"
             else:
-                line = f"[{fps:4.1f}fps {status:11s} {pose_tag:8s}] no face"
+                line = f"[{fps:4.1f}fps {status:11s} {pose_tag:8s} {hand_tag:8s}] no face"
             if frame_count % 30 == 0 and pose_tracker.last_debug:
                 dbg = pose_tracker.last_debug
                 d = dbg["dirs"]
@@ -303,7 +317,18 @@ def main() -> None:
                 print(f"  R: sh→el=({d['ru'][0]:+.2f},{d['ru'][1]:+.2f},{d['ru'][2]:+.2f}) "
                       f"el→wr=({d['rl'][0]:+.2f},{d['rl'][1]:+.2f},{d['rl'][2]:+.2f})")
                 print(f"  lean={dbg['lean']:+.3f}  twist={dbg['spine_y']:+.3f}  lateral={dbg['spine_z']:+.3f}")
-            sys.stdout.write("\r" + line.ljust(90))
+                # Hand detection debug
+                if last_hands:
+                    for side in ["left", "right"]:
+                        h = last_hands.get(side)
+                        if h:
+                            f = h.get("fingers", {})
+                            curls = [f.get(fing, [0]*3)[0] for fing in ["index", "middle", "ring", "little"]]
+                            print(f"  hand[{side}]: index={curls[0]:.2f} mid={curls[1]:.2f} "
+                                  f"ring={curls[2]:.2f} little={curls[3]:.2f}")
+                        else:
+                            print(f"  hand[{side}]: not detected")
+            sys.stdout.write("\r" + line.ljust(100))
             sys.stdout.flush()
 
             remaining = target_dt - (time.monotonic() - now)

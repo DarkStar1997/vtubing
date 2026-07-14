@@ -34,7 +34,7 @@ _L_ELBOW, _R_ELBOW = 13, 14
 _L_WRIST, _R_WRIST = 15, 16
 _L_HIP, _R_HIP = 23, 24
 
-_FILTER_CUTOFF = 1.2
+_FILTER_CUTOFF = 1.0
 _FILTER_BETA = 0.05
 
 
@@ -76,16 +76,23 @@ def _lm_to_arr(lm: Any) -> np.ndarray:
 
 
 def _dir_to_rotation(rest_dir: np.ndarray, target_dir: np.ndarray) -> Rotation:
-    """Rotation that maps rest_dir → target_dir (both 3D vectors)."""
+    """Rotation that maps rest_dir → target_dir (both 3D vectors).
+
+    Includes a deadzone: if the angle between rest and target is very small
+    (< 3°), returns identity to prevent jitter from amplified cross products.
+    """
     r = rest_dir / (np.linalg.norm(rest_dir) + 1e-10)
     t = target_dir / (np.linalg.norm(target_dir) + 1e-10)
     cross = np.cross(r, t)
     n = np.linalg.norm(cross)
     dot = float(np.clip(np.dot(r, t), -1.0, 1.0))
-    if n < 1e-6:
-        return Rotation.identity() if dot > 0 else \
-            Rotation.from_rotvec(np.pi * np.array([0.0, 0.0, 1.0]))
     angle = np.arctan2(n, dot)
+    # Deadzone: small angles → identity (prevents jitter near rest pose)
+    if angle < 0.05:  # ~3 degrees
+        return Rotation.identity()
+    if n < 1e-6:
+        return Rotation.from_rotvec(np.pi * np.array([0.0, 0.0, 1.0])) if dot < 0 \
+            else Rotation.identity()
     return Rotation.from_rotvec((angle / n) * cross)
 
 
@@ -116,9 +123,9 @@ class PoseTracker:
 
     def __init__(self, **kwargs: Any) -> None:
         self._landmarker = PoseLandmarker(**kwargs)
-        # Filter direction vectors (3 components each)
+        # Filter rotation vectors (3 components each) — not direction vectors
         names = ["lu", "ll", "ru", "rl"]
-        self._dir_filters: dict[str, list[OneEuroFilter]] = {
+        self._rot_filters: dict[str, list[OneEuroFilter]] = {
             n: [OneEuroFilter(_FILTER_CUTOFF, _FILTER_BETA) for _ in range(3)]
             for n in names
         }
@@ -136,36 +143,70 @@ class PoseTracker:
         self._spine_y_neutral = self._spine_y_filter._x_prev
         self._spine_z_neutral = self._spine_z_filter._x_prev
 
+    def _filter_rot(self, name: str, rot: Rotation, dt: float) -> Rotation:
+        """Filter a rotation via its rotation vector (axis*angle) with one-euro."""
+        rv = rot.as_rotvec()
+        filtered = np.array([
+            self._rot_filters[name][i].filter(float(rv[i]), dt)
+            for i in range(3)
+        ], dtype=np.float32)
+        return Rotation.from_rotvec(filtered)
+
     def detect(self, rgb_frame: np.ndarray, timestamp_ms: int) -> Any:
         return self._landmarker.detect(rgb_frame, timestamp_ms)
 
-    def extract_angles(self, result: Any, dt: float) -> dict | None:
-        """Extract filtered arm quaternions + torso lean. Returns None if no pose."""
+    def extract_angles(self, result: Any, dt: float,
+                       hands: dict | None = None) -> dict | None:
+        """Extract filtered arm quaternions + torso lean. Returns None if no pose.
+
+        When *hands* (from HandLandmarker) is provided, the hand wrist position
+        is used to supplement arm direction — this improves tracking when the
+        PoseLandmarker's wrist landmarks are inaccurate (e.g. hands near face).
+        """
         if not result.pose_world_landmarks:
             self.last_debug = None
             return None
 
         lms = result.pose_world_landmarks[0]
+        # Also get image-space landmarks (for hand wrist supplementation)
+        img_lms = None
+        if result.pose_landmarks:
+            img_lms = result.pose_landmarks[0]
         ls, rs = _lm_to_arr(lms[_L_SHOULDER]), _lm_to_arr(lms[_R_SHOULDER])
         le, re = _lm_to_arr(lms[_L_ELBOW]), _lm_to_arr(lms[_R_ELBOW])
         lw, rw = _lm_to_arr(lms[_L_WRIST]), _lm_to_arr(lms[_R_WRIST])
         lh, rh = _lm_to_arr(lms[_L_HIP]), _lm_to_arr(lms[_R_HIP])
 
-        # Raw direction vectors converted to VRM model space
-        dirs = {
-            "lu": (le - ls) * self._AXIS_FLIP,
-            "ll": (lw - le) * self._AXIS_FLIP,
-            "ru": (re - rs) * self._AXIS_FLIP,
-            "rl": (rw - re) * self._AXIS_FLIP,
-        }
+        # Image-space → VRM: X=right→model-left (keep), Y=down→up (negate),
+        # Z=negative=closer-to-camera → VRM -Z=forward (keep, don't negate)
+        _IMG_FLIP = np.array([1.0, -1.0, 1.0], dtype=np.float32)
 
-        # Filter direction vectors
-        filt_dirs: dict[str, np.ndarray] = {}
-        for name, d in dirs.items():
-            comps = []
-            for i in range(3):
-                comps.append(self._dir_filters[name][i].filter(float(d[i]), dt))
-            filt_dirs[name] = np.array(comps, dtype=np.float32)
+        # Raw direction vectors converted to VRM model space
+        # Upper arm: shoulder→elbow, Lower arm: elbow→wrist
+        # (PoseLandmarker-only — HandLandmarker supplementation caused twisting
+        #  and folding issues due to coordinate system mismatches)
+        lu_dir = (le - ls) * self._AXIS_FLIP
+        ru_dir = (re - rs) * self._AXIS_FLIP
+        ll_dir = (lw - le) * self._AXIS_FLIP
+        rl_dir = (rw - re) * self._AXIS_FLIP
+
+        dirs = {"lu": lu_dir, "ll": ll_dir, "ru": ru_dir, "rl": rl_dir}
+
+        # Compute rotations from RAW directions (no pre-filtering to avoid distortion)
+        upper_l_raw = _dir_to_rotation(self._REST_L, dirs["lu"])
+        upper_r_raw = _dir_to_rotation(self._REST_R, dirs["ru"])
+        lower_l_world_raw = _dir_to_rotation(self._REST_L, dirs["ll"])
+        lower_r_world_raw = _dir_to_rotation(self._REST_R, dirs["rl"])
+
+        # Lower arm: convert world → local (relative to upper arm) using RAW rotations
+        lower_l_local_raw = upper_l_raw.inv() * lower_l_world_raw
+        lower_r_local_raw = upper_r_raw.inv() * lower_r_world_raw
+
+        # Filter rotations as rotation vectors (preserves rotation structure)
+        upper_l = self._filter_rot("lu", upper_l_raw, dt)
+        upper_r = self._filter_rot("ru", upper_r_raw, dt)
+        lower_l_local = self._filter_rot("ll", lower_l_local_raw, dt)
+        lower_r_local = self._filter_rot("rl", lower_r_local_raw, dt)
 
         _raw_lean = self._torso_filter.filter(_torso_lean(ls, rs, lh, rh), dt)
         if self._torso_neutral is not None:
@@ -191,21 +232,11 @@ class PoseTracker:
         if self._spine_z_neutral is not None:
             spine_z -= self._spine_z_neutral
 
-        # Compute world-space rotations from T-pose direction to observed
-        upper_l = _dir_to_rotation(self._REST_L, filt_dirs["lu"])
-        upper_r = _dir_to_rotation(self._REST_R, filt_dirs["ru"])
-        lower_l_world = _dir_to_rotation(self._REST_L, filt_dirs["ll"])
-        lower_r_world = _dir_to_rotation(self._REST_R, filt_dirs["rl"])
-
-        # Lower arm: convert world → local (relative to upper arm)
-        lower_l_local = upper_l.inv() * lower_l_world
-        lower_r_local = upper_r.inv() * lower_r_world
-
         # Store debug info
         self.last_debug = {
             "ls": ls.tolist(), "le": le.tolist(), "lw": lw.tolist(),
             "rs": rs.tolist(), "re": re.tolist(), "rw": rw.tolist(),
-            "dirs": {k: v.tolist() for k, v in filt_dirs.items()},
+            "dirs": {k: v.tolist() for k, v in dirs.items()},
             "lean": lean,
             "spine_y": spine_y,
             "spine_z": spine_z,

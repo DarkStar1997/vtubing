@@ -1,11 +1,11 @@
 """MediaPipe HandLandmarker wrapper (CPU, VIDEO mode, 2 hands).
 
 Outputs per detection:
-  * 21 normalized landmarks per hand (x, y, z)
-  * Handedness classification (Left / Right)
+  * Per-joint finger angles [0,1] (0=straight, 1=fully curled)
+  * Handedness (Left/Right, swapped for un-mirrored feed)
 
-Finger curls are computed from joint angles and normalised to [0, 1]
-where 0 = straight, 1 = fully curled.
+Finger angles are computed from WORLD landmarks (3D, meters, correct scale)
+rather than image landmarks (where Z has a different scale, distorting angles).
 """
 from __future__ import annotations
 
@@ -25,14 +25,13 @@ MODEL_URL = (
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODEL_PATH = _PROJECT_ROOT / "assets" / "models" / "hand_landmarker.task"
 
-# Landmark indices: [mcp, pip, dip, tip] per finger
-_FINGER_JOINTS = {
-    "thumb":  (1, 2, 3, 4),
-    "index":  (5, 6, 7, 8),
-    "middle": (9, 10, 11, 12),
-    "ring":   (13, 14, 15, 16),
-    "little": (17, 18, 19, 20),
-}
+# Landmark indices
+_WRIST = 0
+_THUMB_CMC, _THUMB_MCP, _THUMB_IP, _THUMB_TIP = 1, 2, 3, 4
+_INDEX_MCP, _INDEX_PIP, _INDEX_DIP, _INDEX_TIP = 5, 6, 7, 8
+_MIDDLE_MCP, _MIDDLE_PIP, _MIDDLE_DIP, _MIDDLE_TIP = 9, 10, 11, 12
+_RING_MCP, _RING_PIP, _RING_DIP, _RING_TIP = 13, 14, 15, 16
+_LITTLE_MCP, _LITTLE_PIP, _LITTLE_DIP, _LITTLE_TIP = 17, 18, 19, 20
 
 
 def ensure_model() -> Path:
@@ -68,45 +67,69 @@ class HandLandmarker:
         return self._detector.detect_for_video(image, timestamp_ms)
 
 
-def _joint_curl(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
-    """Curl at joint *b* given consecutive points a→b→c. Returns [0, 1].
+def _joint_angle(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
+    """Flexion angle at joint *b* given consecutive points a→b→c. Returns [0, 1].
 
-    Straight finger: segments a→b and b→c point the same way → angle ≈ 0 → 0.
+    Straight finger: segments a→b and b→c point the same way → 0.
     Curled finger: segments bend up to ~π → 1.
     """
     v1 = b - a
     v2 = c - b
     n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
-    if n1 < 1e-6 or n2 < 1e-6:
+    if n1 < 1e-8 or n2 < 1e-8:
         return 0.0
     cos_a = np.clip(np.dot(v1, v2) / (n1 * n2), -1.0, 1.0)
     angle = np.arccos(cos_a)
     return float(np.clip(angle / np.pi, 0.0, 1.0))
 
 
-def _compute_curls(lms: list) -> list[float]:
-    """Return [thumb, index, middle, ring, little] curl values in [0, 1]."""
-    pts = np.array([[lm.x, lm.y, lm.z] for lm in lms])
-    curls = []
-    for name, (mcp, pip, dip, tip) in _FINGER_JOINTS.items():
-        if name == "thumb":
-            c = _joint_curl(pts[1], pts[2], pts[3]) * 0.5 + \
-                _joint_curl(pts[2], pts[3], pts[4]) * 0.5
-        else:
-            c = _joint_curl(pts[mcp], pts[pip], pts[dip]) * 0.6 + \
-                _joint_curl(pts[pip], pts[dip], pts[tip]) * 0.4
-        curls.append(c)
-    return curls
+def _compute_finger_angles(pts: np.ndarray) -> dict[str, list[float]]:
+    """Per-joint flexion angles for each finger. 0=straight, 1=curled.
+
+    *pts* must be 3D points with correct scale (world landmarks, not image).
+    Returns {finger: [joint_angles...]} where joint order is proximal→distal.
+    """
+    w = pts[_WRIST]
+    return {
+        "thumb": [
+            _joint_angle(w, pts[_THUMB_CMC], pts[_THUMB_MCP]),
+            _joint_angle(pts[_THUMB_CMC], pts[_THUMB_MCP], pts[_THUMB_IP]),
+            _joint_angle(pts[_THUMB_MCP], pts[_THUMB_IP], pts[_THUMB_TIP]),
+        ],
+        "index": [
+            _joint_angle(w, pts[_INDEX_MCP], pts[_INDEX_PIP]),
+            _joint_angle(pts[_INDEX_MCP], pts[_INDEX_PIP], pts[_INDEX_DIP]),
+            _joint_angle(pts[_INDEX_PIP], pts[_INDEX_DIP], pts[_INDEX_TIP]),
+        ],
+        "middle": [
+            _joint_angle(w, pts[_MIDDLE_MCP], pts[_MIDDLE_PIP]),
+            _joint_angle(pts[_MIDDLE_MCP], pts[_MIDDLE_PIP], pts[_MIDDLE_DIP]),
+            _joint_angle(pts[_MIDDLE_PIP], pts[_MIDDLE_DIP], pts[_MIDDLE_TIP]),
+        ],
+        "ring": [
+            _joint_angle(w, pts[_RING_MCP], pts[_RING_PIP]),
+            _joint_angle(pts[_RING_MCP], pts[_RING_PIP], pts[_RING_DIP]),
+            _joint_angle(pts[_RING_PIP], pts[_RING_DIP], pts[_RING_TIP]),
+        ],
+        "little": [
+            _joint_angle(w, pts[_LITTLE_MCP], pts[_LITTLE_PIP]),
+            _joint_angle(pts[_LITTLE_MCP], pts[_LITTLE_PIP], pts[_LITTLE_DIP]),
+            _joint_angle(pts[_LITTLE_PIP], pts[_LITTLE_DIP], pts[_LITTLE_TIP]),
+        ],
+    }
 
 
 def extract_hands(result: Any) -> dict[str, dict | None]:
-    """Parse HandLandmarkerResult into {left: {curls: [...]}, right: {...}}.
+    """Parse HandLandmarkerResult into per-hand finger angles.
 
-    Returns ``{"left": None, "right": None}`` when no hands are detected.
+    Returns ``{"left": {...}|None, "right": {...}|None}`` where each hand dict
+    has ``"fingers"`` (dict of joint angles per finger, 0=straight 1=curled).
     """
     out: dict[str, dict | None] = {"left": None, "right": None}
     if not result.hand_landmarks:
         return out
+
+    world_lms_list = getattr(result, "hand_world_landmarks", None) or []
 
     for i, lms in enumerate(result.hand_landmarks):
         handed = "right"
@@ -114,9 +137,25 @@ def extract_hands(result: Any) -> dict[str, dict | None]:
             cats = result.handedness[i]
             if cats:
                 handed = cats[0].category_name.lower()
-        # MediaPipe assumes a mirrored (selfie) view by default; our feed
-        # is un-mirrored, so swap Left/Right.
-        side = "right" if handed == "left" else "left"
-        out[side] = {"curls": _compute_curls(lms)}
+        # MediaPipe's handedness is already correct for un-mirrored feeds
+        # (it assumes mirrored/selfie by default, which inverts for our
+        # un-mirrored camera — net result: labels match the user's hands).
+        side = handed
+
+        # Use world landmarks for angle computation (correct 3D scale).
+        # Fall back to image landmarks if world landmarks unavailable.
+        if i < len(world_lms_list) and len(world_lms_list[i]) >= 21:
+            wl = world_lms_list[i]
+            pts = np.array(
+                [[lm.x, lm.y, lm.z] for lm in wl], dtype=np.float32
+            )
+        else:
+            pts = np.array(
+                [[lm.x, lm.y, lm.z] for lm in lms], dtype=np.float32
+            )
+
+        out[side] = {
+            "fingers": _compute_finger_angles(pts),
+        }
 
     return out
