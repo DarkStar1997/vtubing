@@ -12,9 +12,9 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setClearColor(0x000000, 0);
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 100);
-camera.position.set(0, 1.35, -1.8);
-camera.lookAt(0, 1.35, 0);
+const camera = new THREE.PerspectiveCamera(32, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(0, 1.45, -1.8);
+camera.lookAt(0, 1.32, 0);
 
 // Lights — simple 3-point setup
 scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.0));
@@ -30,6 +30,7 @@ scene.add(fill);
 // ---------------------------------------------------------------------------
 let vrm = null;
 let currentVrmUrl = null;
+let _framingApplied = false;
 
 // Default rest pose — used when no body tracking data is available
 const _REST_POSE = {
@@ -42,8 +43,15 @@ const _REST_POSE = {
 function _applyPose(vrmModel, pose) {
   const h = vrmModel.humanoid;
   if (!h) return;
+
+  // Seated base posture — natural sitting at a desk
+  const hips = _getBone("hips");
+  if (hips) hips.rotation.set(0.06, 0, 0);
+  const spine = _getBone("spine");
+  if (spine) spine.rotation.set(0.04, 0, 0);
+
   if (pose && pose.leftUpperArm) {
-    // Tracked pose — apply quaternions
+    // Tracked pose — apply arm quaternions
     for (const name of ["leftUpperArm", "rightUpperArm", "leftLowerArm", "rightLowerArm"]) {
       const bone = _getBone(name);
       if (bone && pose[name]) {
@@ -51,21 +59,27 @@ function _applyPose(vrmModel, pose) {
         bone.quaternion.set(x, y, z, w);
       }
     }
-    const lean = pose.torso ?? 0;
-    for (const name of ["upperChest", "chest"]) {
-      const bone = _getBone(name);
-      if (bone) bone.rotation.set(lean * 0.5, 0, 0);
-    }
+    // Spine: forward lean + twist + lateral bend
+    const sp = pose.spine;  // [lean, twist, lateral]
+    const lean = sp ? sp[0] : (pose.torso ?? 0);
+    const twist = sp ? sp[1] : 0;
+    const lateral = sp ? sp[2] : 0;
+    const upperChest = _getBone("upperChest");
+    if (upperChest) upperChest.rotation.set(lean * 0.5, twist * 0.5, lateral * 0.5);
+    const chest = _getBone("chest");
+    if (chest) chest.rotation.set(lean * 0.3, twist * 0.3, lateral * 0.3);
+    // Distribute spine bend
+    if (spine) spine.rotation.set(0.04 + lean * 0.2, twist * 0.2, lateral * 0.2);
   } else {
-    // Fallback rest pose
+    // Fallback rest pose — relaxed A-pose for sitting
     for (const [name, rot] of Object.entries(_REST_POSE)) {
       const bone = _getBone(name);
       if (bone) bone.rotation.set(rot.x, rot.y, rot.z);
     }
-    for (const name of ["upperChest", "chest"]) {
-      const bone = _getBone(name);
-      if (bone) bone.rotation.set(0, 0, 0);
-    }
+    const upperChest = _getBone("upperChest");
+    if (upperChest) upperChest.rotation.set(0, 0, 0);
+    const chest = _getBone("chest");
+    if (chest) chest.rotation.set(0, 0, 0);
   }
 }
 
@@ -82,21 +96,99 @@ async function loadVRM(url) {
   VRMUtils.combineSkeletons(vrm.scene);
   scene.add(vrm.scene);
   for (const k of Object.keys(_BONE_CACHE)) delete _BONE_CACHE[k];
+  _framingApplied = false;
 
-  // Centre + frame the model (upper-body framing for VTubing)
+  // Debug: log head bone rest rotation
+  const _hd = vrm.humanoid?.getNormalizedBoneNode("head");
+  if (_hd) console.log("[dbg] head rest rot:", _hd.rotation.x.toFixed(3), _hd.rotation.y.toFixed(3), _hd.rotation.z.toFixed(3));
+
+  // Centre + frame the model — bust shot (head to chest), webcam from above
   const box = new THREE.Box3().setFromObject(vrm.scene);
   const centre = box.getCenter(new THREE.Vector3());
   const size = box.getSize(new THREE.Vector3());
   vrm.scene.position.x -= centre.x;
-  const targetY = centre.y + size.y * 0.05;
-  const dist = Math.max(size.y * 1.7, 2.2);
-  camera.position.set(0, targetY, -dist);
-  camera.lookAt(0, targetY, 0);
-  camera.fov = 30;
+  // Target upper chest / neck area
+  const targetY = centre.y + size.y * 0.28;
+  const dist = Math.max(size.y * 0.85, 1.1);
+  // Camera slightly above eye-level looking down — mimics a webcam on a monitor
+  camera.position.set(0, targetY + 0.10, -dist);
+  camera.lookAt(0, targetY - 0.02, 0);
+  camera.fov = 28;
   camera.updateProjectionMatrix();
 
   currentVrmUrl = url;
   console.log("VRM loaded:", vrm.meta?.name ?? "(unknown)");
+}
+
+// ---------------------------------------------------------------------------
+// Calibration-based camera framing — match the user's webcam composition
+// ---------------------------------------------------------------------------
+const _projV = new THREE.Vector3();
+
+function _projectToScreenY(worldY) {
+  _projV.set(0, worldY, 0).project(camera);
+  return (1 - _projV.y) / 2; // 0=top, 1=bottom
+}
+
+function applyFraming(framing) {
+  if (!vrm || !framing || _framingApplied) return;
+
+  const headBone = _getBone("head");
+  if (!headBone) return;
+
+  // Model geometry
+  const headPos = new THREE.Vector3();
+  headBone.getWorldPosition(headPos);
+  const sceneBox = new THREE.Box3().setFromObject(vrm.scene);
+  const sceneSize = sceneBox.getSize(new THREE.Vector3());
+
+  // Model face height ≈ 13% of body height (standard human proportion)
+  const modelFaceH = sceneSize.y * 0.13;
+  // Model face center ≈ slightly above head bone (head bone is at neck/base of skull)
+  const modelFaceCenter = headPos.y + sceneSize.y * 0.035;
+
+  // User's webcam framing (normalized 0-1, 0=top)
+  const userFaceH = framing.face_h;
+  const userFaceCenter = framing.face_center_y;
+
+  const fov = 28;
+  const halfFov = (fov * Math.PI) / 360;
+  const tanHalfFov = Math.tan(halfFov);
+
+  // Distance: match avatar's face size to user's face size in frame
+  // userFaceH fraction of frame = modelFaceH / (2 * dist * tanHalfFov)
+  let dist = modelFaceH / (Math.max(userFaceH, 0.01) * 2 * tanHalfFov);
+  // Target Y: match avatar's face center to user's face center in frame
+  let targetY = modelFaceCenter + (2 * userFaceCenter - 1) * dist * tanHalfFov;
+
+  // Iterative correction for camera tilt
+  const tiltOffset = 0.10;
+  for (let i = 0; i < 5; i++) {
+    camera.position.set(0, targetY + tiltOffset, -dist);
+    camera.lookAt(0, targetY, 0);
+    camera.fov = fov;
+    camera.updateProjectionMatrix();
+
+    const screenFaceCenter = _projectToScreenY(modelFaceCenter);
+    const err = userFaceCenter - screenFaceCenter;
+    targetY += err * dist * tanHalfFov * 0.8;
+  }
+
+  camera.position.set(0, targetY + tiltOffset, -dist);
+  camera.lookAt(0, targetY, 0);
+  camera.fov = fov;
+  camera.updateProjectionMatrix();
+
+  _framingApplied = true;
+  const screenFaceCenter = _projectToScreenY(modelFaceCenter);
+  console.log("Framing applied:", {
+    modelFaceH: modelFaceH.toFixed(4),
+    userFaceH: userFaceH.toFixed(4),
+    dist: dist.toFixed(3),
+    targetY: targetY.toFixed(3),
+    screenFaceCenter: screenFaceCenter.toFixed(3),
+    target: userFaceCenter.toFixed(3),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -145,7 +237,7 @@ function applyRig(rig) {
     if (head) {
       const [yaw, pitch, roll] = rig.head;
       head.rotation.order = "YXZ";
-      head.rotation.set(pitch, yaw, roll);
+      head.rotation.set(pitch + 0.32, yaw, roll);
     }
   }
 
@@ -214,6 +306,7 @@ function animate() {
   requestAnimationFrame(animate);
   const dt = clock.getDelta();
   if (vrm) {
+    if (latestRig?.framing) applyFraming(latestRig.framing);
     _applyPose(vrm, latestRig?.pose);
     applyRig(latestRig);
     vrm.update(dt); // spring bones, etc.

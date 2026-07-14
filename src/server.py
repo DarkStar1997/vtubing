@@ -104,7 +104,10 @@ class RigServer:
         return web.FileResponse(_FRONTEND_DIR / "index.html")
 
     async def _avatar_js(self, _request: web.Request) -> web.Response:
-        return web.FileResponse(_FRONTEND_DIR / "avatar.js")
+        return web.FileResponse(
+            _FRONTEND_DIR / "avatar.js",
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
 
     async def _vrm_file(self, _request: web.Request) -> web.Response:
         if not self._avatar_path.exists():

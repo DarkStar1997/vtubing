@@ -104,7 +104,8 @@ def _draw_pose_landmarks(frame: np.ndarray, result) -> np.ndarray:
     return annotated
 
 
-def _state_to_ws(state: dict, hands: dict | None = None, pose: dict | None = None) -> dict:
+def _state_to_ws(state: dict, hands: dict | None = None, pose: dict | None = None,
+                 framing: dict | None = None) -> dict:
     """Convert solver state to the JSON format the browser expects."""
     # Head rotation: 3x3 matrix -> YXZ Euler radians [yaw, pitch, roll]
     head_delta = state.get("head_delta")
@@ -129,6 +130,7 @@ def _state_to_ws(state: dict, hands: dict | None = None, pose: dict | None = Non
         "gaze": gaze,
         "hands": hands,
         "pose": pose,
+        "framing": framing,
     }
 
 
@@ -201,6 +203,12 @@ def main() -> None:
     t0 = time.monotonic()
     t_prev = t0
 
+    # Framing calibration — collect head + shoulder positions from webcam
+    _calib_face_mins: list[float] = []
+    _calib_face_maxs: list[float] = []
+    _calib_shoulder_ys: list[float] = []
+    framing: dict | None = None
+
     try:
         while not stop.is_set():
             frame, new = cap.get_latest()
@@ -224,6 +232,15 @@ def main() -> None:
                     last_pose = pose_tracker.extract_angles(pose_result, target_dt)
                     last_pose_result = pose_result
 
+                    # Collect framing data during calibration
+                    if not solver.is_calibrated and last_result.face_landmarks:
+                        face_ys = [lm.y for lm in last_result.face_landmarks[0]]
+                        _calib_face_mins.append(min(face_ys))
+                        _calib_face_maxs.append(max(face_ys))
+                        if pose_result.pose_landmarks:
+                            pl = pose_result.pose_landmarks[0]
+                            _calib_shoulder_ys.append((pl[11].y + pl[12].y) / 2)
+
             now = time.monotonic()
             dt = now - t_prev
             t_prev = now
@@ -237,7 +254,26 @@ def main() -> None:
             else:
                 state = solver.update(last_rig, dt)
 
-            server.broadcast(_state_to_ws(state, last_hands, last_pose))
+            # Compute framing once calibration completes
+            if solver.is_calibrated and framing is None and _calib_face_mins:
+                face_min = float(np.mean(_calib_face_mins))
+                face_max = float(np.mean(_calib_face_maxs))
+                face_h = face_max - face_min
+                face_center_y = (face_min + face_max) / 2
+                if _calib_shoulder_ys:
+                    shoulder_y = float(np.mean(_calib_shoulder_ys))
+                else:
+                    shoulder_y = face_max + face_h * 0.5
+                framing = {
+                    "face_h": face_h,
+                    "face_center_y": face_center_y,
+                    "shoulder_y": shoulder_y,
+                }
+                pose_tracker.calibrate_neutral()
+                print(f"\n[main] framing: face_h={face_h:.3f} "
+                      f"face_center={face_center_y:.3f} shoulder={shoulder_y:.3f}")
+
+            server.broadcast(_state_to_ws(state, last_hands, last_pose, framing))
 
             if frame is not None:
                 annotated = _draw_landmarks(frame, last_result)
@@ -266,7 +302,7 @@ def main() -> None:
                       f"el→wr=({d['ll'][0]:+.2f},{d['ll'][1]:+.2f},{d['ll'][2]:+.2f})")
                 print(f"  R: sh→el=({d['ru'][0]:+.2f},{d['ru'][1]:+.2f},{d['ru'][2]:+.2f}) "
                       f"el→wr=({d['rl'][0]:+.2f},{d['rl'][1]:+.2f},{d['rl'][2]:+.2f})")
-                print(f"  lean={dbg['lean']:+.3f}")
+                print(f"  lean={dbg['lean']:+.3f}  twist={dbg['spine_y']:+.3f}  lateral={dbg['spine_z']:+.3f}")
             sys.stdout.write("\r" + line.ljust(90))
             sys.stdout.flush()
 

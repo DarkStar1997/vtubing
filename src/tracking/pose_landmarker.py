@@ -123,7 +123,18 @@ class PoseTracker:
             for n in names
         }
         self._torso_filter = OneEuroFilter(_FILTER_CUTOFF, 0.0)
+        self._spine_y_filter = OneEuroFilter(_FILTER_CUTOFF, 0.0)
+        self._spine_z_filter = OneEuroFilter(_FILTER_CUTOFF, 0.0)
+        self._torso_neutral: float | None = None
+        self._spine_y_neutral: float | None = None
+        self._spine_z_neutral: float | None = None
         self.last_debug: dict | None = None
+
+    def calibrate_neutral(self) -> None:
+        """Capture current filtered spine values as the neutral baseline."""
+        self._torso_neutral = self._torso_filter._x_prev
+        self._spine_y_neutral = self._spine_y_filter._x_prev
+        self._spine_z_neutral = self._spine_z_filter._x_prev
 
     def detect(self, rgb_frame: np.ndarray, timestamp_ms: int) -> Any:
         return self._landmarker.detect(rgb_frame, timestamp_ms)
@@ -156,7 +167,29 @@ class PoseTracker:
                 comps.append(self._dir_filters[name][i].filter(float(d[i]), dt))
             filt_dirs[name] = np.array(comps, dtype=np.float32)
 
-        lean = -self._torso_filter.filter(_torso_lean(ls, rs, lh, rh), dt)
+        _raw_lean = self._torso_filter.filter(_torso_lean(ls, rs, lh, rh), dt)
+        if self._torso_neutral is not None:
+            _raw_lean -= self._torso_neutral
+        lean = -_raw_lean
+
+        # Spine lateral bend + twist from shoulder line (VRM space)
+        # shoulder_vec points from right shoulder to left shoulder
+        shoulder_vec = (ls - rs) * self._AXIS_FLIP
+        horiz = float(np.sqrt(shoulder_vec[0] ** 2 + shoulder_vec[2] ** 2))
+        if horiz > 1e-5:
+            # Lateral bend: left shoulder higher → spine bends right (negative Z)
+            raw_z = float(-np.arctan2(shoulder_vec[1], horiz))
+            # Twist: left shoulder forward (−Z in VRM) → torso twists left (positive Y)
+            raw_y = float(np.arctan2(-shoulder_vec[2], horiz))
+        else:
+            raw_z = 0.0
+            raw_y = 0.0
+        spine_y = self._spine_y_filter.filter(raw_y, dt)
+        spine_z = self._spine_z_filter.filter(raw_z, dt)
+        if self._spine_y_neutral is not None:
+            spine_y -= self._spine_y_neutral
+        if self._spine_z_neutral is not None:
+            spine_z -= self._spine_z_neutral
 
         # Compute world-space rotations from T-pose direction to observed
         upper_l = _dir_to_rotation(self._REST_L, filt_dirs["lu"])
@@ -174,6 +207,8 @@ class PoseTracker:
             "rs": rs.tolist(), "re": re.tolist(), "rw": rw.tolist(),
             "dirs": {k: v.tolist() for k, v in filt_dirs.items()},
             "lean": lean,
+            "spine_y": spine_y,
+            "spine_z": spine_z,
         }
 
         return {
@@ -182,4 +217,5 @@ class PoseTracker:
             "leftLowerArm": lower_l_local.as_quat().tolist(),
             "rightLowerArm": lower_r_local.as_quat().tolist(),
             "torso": float(lean),
+            "spine": [float(lean), float(spine_y), float(spine_z)],
         }
