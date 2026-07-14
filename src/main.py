@@ -27,10 +27,32 @@ from src.capture.webcam import WebcamCapture
 from src.config import load_config
 from src.rig.solver import RigSolver
 from src.server import RigServer
+from src.tracking.hand_landmarker import HandLandmarker, extract_hands
 from src.tracking.landmarker import FaceLandmarker, extract_rig
+from src.tracking.pose_landmarker import PoseTracker
 
 _CONTOURS = [(c.start, c.end) for c in _FLC.FACE_LANDMARKS_CONTOURS]
 _TESSELATION = [(c.start, c.end) for c in _FLC.FACE_LANDMARKS_TESSELATION]
+
+_HAND_CONNECTIONS = [
+    (0,1),(1,2),(2,3),(3,4),
+    (0,5),(5,6),(6,7),(7,8),
+    (5,9),(9,10),(10,11),(11,12),
+    (9,13),(13,14),(14,15),(15,16),
+    (13,17),(17,18),(18,19),(19,20),
+    (0,17),
+]
+
+_POSE_CONNECTIONS = [
+    (11,12),
+    (11,13),(13,15),
+    (12,14),(14,16),
+    (15,17),(15,19),(15,21),(17,19),
+    (16,18),(16,20),(16,22),(18,20),
+    (11,23),(12,24),(23,24),
+    (23,25),(25,27),(27,29),(27,31),(29,31),
+    (24,26),(26,28),(28,30),(28,32),(30,32),
+]
 
 
 def _draw_landmarks(frame: np.ndarray, result) -> np.ndarray:
@@ -49,7 +71,40 @@ def _draw_landmarks(frame: np.ndarray, result) -> np.ndarray:
     return annotated
 
 
-def _state_to_ws(state: dict) -> dict:
+def _draw_hand_landmarks(frame: np.ndarray, result) -> np.ndarray:
+    """Draw MediaPipe hand landmarks + connections on a BGR frame copy."""
+    if result is None or not result.hand_landmarks:
+        return frame
+    annotated = frame.copy()
+    h, w = frame.shape[:2]
+    for hand_lms in result.hand_landmarks:
+        pts = [(int(lm.x * w), int(lm.y * h)) for lm in hand_lms]
+        for s, e in _HAND_CONNECTIONS:
+            if s < len(pts) and e < len(pts):
+                cv2.line(annotated, pts[s], pts[e], (255, 200, 0), 2)
+        for pt in pts:
+            cv2.circle(annotated, pt, 3, (0, 100, 255), -1)
+    return annotated
+
+
+def _draw_pose_landmarks(frame: np.ndarray, result) -> np.ndarray:
+    """Draw MediaPipe pose skeleton on a BGR frame copy."""
+    if result is None or not result.pose_landmarks:
+        return frame
+    annotated = frame.copy()
+    h, w = frame.shape[:2]
+    for pose in result.pose_landmarks:
+        pts = [(int(lm.x * w), int(lm.y * h)) for lm in pose]
+        for s, e in _POSE_CONNECTIONS:
+            if s < len(pts) and e < len(pts):
+                cv2.line(annotated, pts[s], pts[e], (0, 255, 255), 3)
+        for i, pt in enumerate(pts):
+            color = (0, 0, 255) if i in (11, 12, 13, 14, 15, 16) else (0, 180, 180)
+            cv2.circle(annotated, pt, 5, color, -1)
+    return annotated
+
+
+def _state_to_ws(state: dict, hands: dict | None = None, pose: dict | None = None) -> dict:
     """Convert solver state to the JSON format the browser expects."""
     # Head rotation: 3x3 matrix -> YXZ Euler radians [yaw, pitch, roll]
     head_delta = state.get("head_delta")
@@ -72,6 +127,8 @@ def _state_to_ws(state: dict) -> dict:
         "expressions": {k: float(v) for k, v in state.get("expressions", {}).items()},
         "head": head,
         "gaze": gaze,
+        "hands": hands,
+        "pose": pose,
     }
 
 
@@ -102,6 +159,18 @@ def main() -> None:
         min_tracking_confidence=track_cfg.get("min_tracking_confidence", 0.5),
     )
 
+    hand_landmarker = HandLandmarker(
+        num_hands=track_cfg.get("num_hands", 2),
+        min_detection_confidence=track_cfg.get("min_hand_detection_confidence", 0.5),
+        min_tracking_confidence=track_cfg.get("min_hand_tracking_confidence", 0.5),
+    )
+
+    pose_tracker = PoseTracker(
+        num_poses=1,
+        min_detection_confidence=track_cfg.get("min_pose_detection_confidence", 0.5),
+        min_tracking_confidence=track_cfg.get("min_pose_tracking_confidence", 0.5),
+    )
+
     model = load_vrm(vrm_path)
     solver = RigSolver(model, rig_cfg)
 
@@ -124,6 +193,10 @@ def main() -> None:
     last_ts = 0
     last_rig: dict | None = None
     last_result = None
+    last_hands: dict | None = None
+    last_hand_result = None
+    last_pose: dict | None = None
+    last_pose_result = None
     frame_count = 0
     t0 = time.monotonic()
     t_prev = t0
@@ -144,6 +217,12 @@ def main() -> None:
                     result = landmarker.detect(rgb_buf, ts)
                     last_rig = extract_rig(result)
                     last_result = result
+                    hand_result = hand_landmarker.detect(rgb_buf, ts + 1)
+                    last_hands = extract_hands(hand_result)
+                    last_hand_result = hand_result
+                    pose_result = pose_tracker.detect(rgb_buf, ts + 2)
+                    last_pose = pose_tracker.extract_angles(pose_result, target_dt)
+                    last_pose_result = pose_result
 
             now = time.monotonic()
             dt = now - t_prev
@@ -158,10 +237,12 @@ def main() -> None:
             else:
                 state = solver.update(last_rig, dt)
 
-            server.broadcast(_state_to_ws(state))
+            server.broadcast(_state_to_ws(state, last_hands, last_pose))
 
             if frame is not None:
                 annotated = _draw_landmarks(frame, last_result)
+                annotated = _draw_hand_landmarks(annotated, last_hand_result)
+                annotated = _draw_pose_landmarks(annotated, last_pose_result)
                 ok, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 75])
                 if ok:
                     server.set_camera_frame(jpeg.tobytes())
@@ -170,14 +251,23 @@ def main() -> None:
             elapsed = time.monotonic() - t0
             fps = frame_count / elapsed if elapsed > 0 else 0.0
             status = "calibrated" if solver.is_calibrated else "calibrating"
+            pose_tag = "pose" if last_pose else "no-pose"
             if state["detected"]:
                 exprs = state.get("expressions", {})
                 top = sorted(exprs.items(), key=lambda kv: -kv[1])[:3]
                 expr_str = " ".join(f"{n}={v:.2f}" for n, v in top if v > 0.01)
-                line = f"[{fps:4.1f}fps {status:11s}] {expr_str}"
+                line = f"[{fps:4.1f}fps {status:11s} {pose_tag:8s}] {expr_str}"
             else:
-                line = f"[{fps:4.1f}fps {status:11s}] no face"
-            sys.stdout.write("\r" + line.ljust(80))
+                line = f"[{fps:4.1f}fps {status:11s} {pose_tag:8s}] no face"
+            if frame_count % 30 == 0 and pose_tracker.last_debug:
+                dbg = pose_tracker.last_debug
+                d = dbg["dirs"]
+                print(f"\n  L: sh→el=({d['lu'][0]:+.2f},{d['lu'][1]:+.2f},{d['lu'][2]:+.2f}) "
+                      f"el→wr=({d['ll'][0]:+.2f},{d['ll'][1]:+.2f},{d['ll'][2]:+.2f})")
+                print(f"  R: sh→el=({d['ru'][0]:+.2f},{d['ru'][1]:+.2f},{d['ru'][2]:+.2f}) "
+                      f"el→wr=({d['rl'][0]:+.2f},{d['rl'][1]:+.2f},{d['rl'][2]:+.2f})")
+                print(f"  lean={dbg['lean']:+.3f}")
+            sys.stdout.write("\r" + line.ljust(90))
             sys.stdout.flush()
 
             remaining = target_dt - (time.monotonic() - now)
