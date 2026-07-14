@@ -5,7 +5,7 @@ camera:
   fps: 30
 
 avatar:
-  path: assets/avatars/sample.vrm   # local dev test asset; friend sets their own
+  path: assets/avatars/male_52blendshapes.vrm   # PS_Male (VRoid 0.x, 52 ARKit + 18 preset expressions)
 
 tracking:
   num_faces: 1
@@ -21,6 +21,15 @@ rig:
   head:
     min_cutoff: 1.5     # lower = more smoothing at rest
     beta: 0.05          # responsiveness to fast head movement
+    # Rotation gain + clamp: VRM models are thin shells designed for
+    # front-facing view.  Scaling down keeps the avatar looking good
+    # without revealing the hollow interior at large head angles.
+    yaw_gain: 0.65
+    pitch_gain: 0.65
+    roll_gain: 0.65
+    max_yaw: 35.0       # degrees; avatar never turns past this
+    max_pitch: 20.0
+    max_roll: 15.0
   gaze:
     min_cutoff: 3.0
     beta: 0.0

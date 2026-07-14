@@ -36,6 +36,16 @@ _GAZE_BETA = 0.0
 _CALIB_FRAMES = 30
 _LOSS_DECAY_SEC = 0.2
 
+# Head rotation gain + clamp defaults.  VRM models are thin shells designed
+# for front-facing view; scaling down rotation keeps the avatar looking good
+# without revealing the hollow interior (standard VTubing practice).
+_HEAD_YAW_GAIN = 0.65
+_HEAD_PITCH_GAIN = 0.65
+_HEAD_ROLL_GAIN = 0.65
+_HEAD_MAX_YAW = 35.0
+_HEAD_MAX_PITCH = 20.0
+_HEAD_MAX_ROLL = 15.0
+
 
 def _clamp01(v: float) -> float:
     return 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
@@ -131,6 +141,16 @@ class RigSolver:
             )
             for _ in range(2)
         ]
+        self._head_gains = np.array([
+            head_cfg.get("yaw_gain", _HEAD_YAW_GAIN),
+            head_cfg.get("pitch_gain", _HEAD_PITCH_GAIN),
+            head_cfg.get("roll_gain", _HEAD_ROLL_GAIN),
+        ], dtype=np.float32)
+        self._head_clamps = np.array([
+            head_cfg.get("max_yaw", _HEAD_MAX_YAW),
+            head_cfg.get("max_pitch", _HEAD_MAX_PITCH),
+            head_cfg.get("max_roll", _HEAD_MAX_ROLL),
+        ], dtype=np.float32)
 
         calib_cfg = cfg.get("calibration", {})
         self._calib_target = int(calib_cfg.get("frames", _CALIB_FRAMES))
@@ -212,6 +232,8 @@ class RigSolver:
         # MediaPipe sees the user from the front; the avatar should mimic the
         # user as seen by the camera (non-mirrored).  This inverts yaw only.
         euler[0] = -euler[0]
+        # Scale + clamp rotation to keep the thin-shell model front-facing.
+        euler = np.clip(euler * self._head_gains, -self._head_clamps, self._head_clamps)
         euler_f = np.array([
             self._head_filters[0].filter(euler[0], dt),
             self._head_filters[1].filter(euler[1], dt),

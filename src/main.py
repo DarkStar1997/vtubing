@@ -1,17 +1,15 @@
-"""M4 entry point: webcam -> MediaPipe -> rig solver -> VRM renderer -> sink.
+"""Live VTubing pipeline: webcam -> MediaPipe -> rig solver -> WebSocket.
 
-Full real-time VTubing pipeline:
-  1. Background-thread webcam capture (latest-frame-only)
-  2. MediaPipe FaceLandmarker (CPU, VIDEO mode) on new frames only
-  3. RigSolver: ARKit blendshapes -> VRM expressions + head pose + eye gaze
-  4. VRMRenderer: moderngl offscreen render with morph targets + skinning
-  5. Output sink: preview window / file / virtual camera
+Sends rig state (expressions, head pose, eye gaze) to the browser frontend
+which renders the VRM avatar with three-vrm.  Open the printed URL in a
+browser (or add it as an OBS Browser Source).
 
 Rate-decoupled: tracking runs only when a new webcam frame arrives; the
-renderer always outputs at the configured target FPS, reusing the last rig.
+solver always runs and broadcasts at the configured target FPS.
 """
 from __future__ import annotations
 
+import math
 import signal
 import sys
 import threading
@@ -20,14 +18,61 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from scipy.spatial.transform import Rotation
 
-from src.avatar.renderer import VRMRenderer
+from mediapipe.tasks.python.vision.face_landmarker import FaceLandmarksConnections as _FLC
+
 from src.avatar.vrm_loader import load_vrm
 from src.capture.webcam import WebcamCapture
 from src.config import load_config
-from src.output.sink import create_sink
 from src.rig.solver import RigSolver
+from src.server import RigServer
 from src.tracking.landmarker import FaceLandmarker, extract_rig
+
+_CONTOURS = [(c.start, c.end) for c in _FLC.FACE_LANDMARKS_CONTOURS]
+_TESSELATION = [(c.start, c.end) for c in _FLC.FACE_LANDMARKS_TESSELATION]
+
+
+def _draw_landmarks(frame: np.ndarray, result) -> np.ndarray:
+    """Draw MediaPipe face mesh (tesselation + contours) on a BGR frame copy."""
+    if result is None or not result.face_landmarks:
+        return frame
+    annotated = frame.copy()
+    h, w = frame.shape[:2]
+    pts = [(int(lm.x * w), int(lm.y * h)) for lm in result.face_landmarks[0]]
+    for s, e in _TESSELATION:
+        if s < len(pts) and e < len(pts):
+            cv2.line(annotated, pts[s], pts[e], (40, 80, 40), 1)
+    for s, e in _CONTOURS:
+        if s < len(pts) and e < len(pts):
+            cv2.line(annotated, pts[s], pts[e], (0, 255, 0), 1)
+    return annotated
+
+
+def _state_to_ws(state: dict) -> dict:
+    """Convert solver state to the JSON format the browser expects."""
+    # Head rotation: 3x3 matrix -> YXZ Euler radians [yaw, pitch, roll]
+    head_delta = state.get("head_delta")
+    if head_delta is not None:
+        yaw, pitch, roll = Rotation.from_matrix(head_delta).as_euler(
+            "YXZ", degrees=False
+        )
+        head = [float(yaw), float(-pitch), float(roll)]
+    else:
+        head = None
+
+    gaze = [
+        math.radians(float(state.get("eye_yaw", 0.0))),
+        math.radians(float(state.get("eye_pitch", 0.0))),
+    ]
+
+    return {
+        "detected": bool(state.get("detected", False)),
+        "calibrated": bool(state.get("calibrated", False)),
+        "expressions": {k: float(v) for k, v in state.get("expressions", {}).items()},
+        "head": head,
+        "gaze": gaze,
+    }
 
 
 def main() -> None:
@@ -58,15 +103,18 @@ def main() -> None:
     )
 
     model = load_vrm(vrm_path)
-    out_w = out_cfg.get("width", 1280)
-    out_h = out_cfg.get("height", 720)
-    renderer = VRMRenderer(model, out_w, out_h)
     solver = RigSolver(model, rig_cfg)
-    sink = create_sink(cfg)
+
+    port = int(out_cfg.get("port", 8080))
+    host = out_cfg.get("host", "localhost")
+    server = RigServer(vrm_path, port=port, host=host)
+    server.start()
+
     target_dt = 1.0 / out_cfg.get("fps", 30.0)
 
-    print(f"[main] avatar: {vrm_path}  output: {out_w}x{out_h}@{out_cfg.get('fps', 30)}fps")
-    print("[main] calibrating... face the camera neutrally. Ctrl+C to stop.", flush=True)
+    print(f"[main] avatar: {vrm_path}")
+    print(f"[main] open {server.url} in a browser, or add as OBS Browser Source.")
+    print("[main] calibrating... face the camera neutrally. Ctrl+C to stop.\n", flush=True)
 
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())
@@ -75,8 +123,8 @@ def main() -> None:
     rgb_buf: np.ndarray | None = None
     last_ts = 0
     last_rig: dict | None = None
+    last_result = None
     frame_count = 0
-    track_count = 0
     t0 = time.monotonic()
     t_prev = t0
 
@@ -95,7 +143,7 @@ def main() -> None:
                     last_ts = ts
                     result = landmarker.detect(rgb_buf, ts)
                     last_rig = extract_rig(result)
-                    track_count += 1
+                    last_result = result
 
             now = time.monotonic()
             dt = now - t_prev
@@ -110,12 +158,15 @@ def main() -> None:
             else:
                 state = solver.update(last_rig, dt)
 
-            renderer.apply_rig_state(state)
-            out_frame = renderer.render()
-            sink.send(out_frame)
-            sink.sleep_until_next_frame()
-            frame_count += 1
+            server.broadcast(_state_to_ws(state))
 
+            if frame is not None:
+                annotated = _draw_landmarks(frame, last_result)
+                ok, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                if ok:
+                    server.set_camera_frame(jpeg.tobytes())
+
+            frame_count += 1
             elapsed = time.monotonic() - t0
             fps = frame_count / elapsed if elapsed > 0 else 0.0
             status = "calibrated" if solver.is_calibrated else "calibrating"
@@ -123,13 +174,17 @@ def main() -> None:
                 exprs = state.get("expressions", {})
                 top = sorted(exprs.items(), key=lambda kv: -kv[1])[:3]
                 expr_str = " ".join(f"{n}={v:.2f}" for n, v in top if v > 0.01)
-                line = f"[{fps:4.1f}fps {status}] {expr_str}"
+                line = f"[{fps:4.1f}fps {status:11s}] {expr_str}"
             else:
-                line = f"[{fps:4.1f}fps {status}] no face"
+                line = f"[{fps:4.1f}fps {status:11s}] no face"
             sys.stdout.write("\r" + line.ljust(80))
             sys.stdout.flush()
+
+            remaining = target_dt - (time.monotonic() - now)
+            if remaining > 0:
+                time.sleep(remaining)
     finally:
-        sink.close()
+        server.stop()
         cap.stop()
         sys.stdout.write("\n[main] stopped.\n")
         sys.stdout.flush()
