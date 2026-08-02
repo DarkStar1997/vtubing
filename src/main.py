@@ -25,6 +25,7 @@ from mediapipe.tasks.python.vision.face_landmarker import FaceLandmarksConnectio
 from src.avatar.vrm_loader import load_vrm
 from src.capture.webcam import WebcamCapture
 from src.config import load_config
+from src.rig.one_euro import OneEuroFilter
 from src.rig.solver import RigSolver
 from src.server import RigServer
 from src.tracking.hand_landmarker import HandLandmarker, extract_hands
@@ -104,6 +105,35 @@ def _draw_pose_landmarks(frame: np.ndarray, result) -> np.ndarray:
     return annotated
 
 
+_hand_twist_neutral: dict[str, float] = {}
+_twist_sin_f: dict[str, OneEuroFilter] = {"left": OneEuroFilter(1.5, 0.01), "right": OneEuroFilter(1.5, 0.01)}
+_twist_cos_f: dict[str, OneEuroFilter] = {"left": OneEuroFilter(1.5, 0.01), "right": OneEuroFilter(1.5, 0.01)}
+_twist_prev: dict[str, float] = {"left": 0.0, "right": 0.0}
+
+
+def _process_hand_twist(hands: dict | None, dt: float) -> None:
+    """Filter palm twist in-place: circular neutral subtraction + sin/cos smoothing."""
+    if not hands:
+        return
+    for side in ("left", "right"):
+        h = hands.get(side)
+        if h is None or "twist" not in h:
+            _twist_prev[side] = 0.0
+            continue
+        raw = h["twist"]
+        neutral = _hand_twist_neutral.get(side, 0.0)
+        if not math.isfinite(raw):
+            raw = _twist_prev[side]
+        # Circular difference (handles ±π wraparound)
+        delta = math.atan2(math.sin(raw - neutral), math.cos(raw - neutral))
+        # Filter sin/cos separately for smooth circular smoothing
+        s = _twist_sin_f[side].filter(math.sin(delta), dt)
+        c = _twist_cos_f[side].filter(math.cos(delta), dt)
+        smooth = math.atan2(s, c)
+        _twist_prev[side] = smooth
+        h["twist"] = smooth
+
+
 def _state_to_ws(state: dict, hands: dict | None = None, pose: dict | None = None,
                  framing: dict | None = None) -> dict:
     """Convert solver state to the JSON format the browser expects."""
@@ -130,7 +160,8 @@ def _state_to_ws(state: dict, hands: dict | None = None, pose: dict | None = Non
             if h is None:
                 clean_hands[side] = None
             else:
-                clean_hands[side] = {k: v for k, v in h.items() if not k.startswith("_")}
+                clean = {k: v for k, v in h.items() if not k.startswith("_")}
+                clean_hands[side] = clean
 
     return {
         "detected": bool(state.get("detected", False)),
@@ -217,6 +248,7 @@ def main() -> None:
     _calib_face_mins: list[float] = []
     _calib_face_maxs: list[float] = []
     _calib_shoulder_ys: list[float] = []
+    _calib_twist: dict[str, list[float]] = {"left": [], "right": []}
     framing: dict | None = None
 
     try:
@@ -237,6 +269,7 @@ def main() -> None:
                     last_result = result
                     hand_result = hand_landmarker.detect(rgb_buf, ts + 1)
                     last_hands = extract_hands(hand_result)
+                    _process_hand_twist(last_hands, target_dt)
                     last_hand_result = hand_result
                     pose_result = pose_tracker.detect(rgb_buf, ts + 2)
                     last_pose = pose_tracker.extract_angles(pose_result, target_dt, last_hands)
@@ -280,6 +313,9 @@ def main() -> None:
                     "shoulder_y": shoulder_y,
                 }
                 pose_tracker.calibrate_neutral()
+                # Skip twist calibration — use neutral=0 for both hands.
+                # The arcsin-based twist is ≈0 when palms face camera, which
+                # is the natural neutral. Calibration caused asymmetric deltas.
                 print(f"\n[main] framing: face_h={face_h:.3f} "
                       f"face_center={face_center_y:.3f} shoulder={shoulder_y:.3f}")
 
@@ -324,8 +360,11 @@ def main() -> None:
                         if h:
                             f = h.get("fingers", {})
                             curls = [f.get(fing, [0]*3)[0] for fing in ["index", "middle", "ring", "little"]]
-                            print(f"  hand[{side}]: index={curls[0]:.2f} mid={curls[1]:.2f} "
+                            curl_str = (f"index={curls[0]:.2f} mid={curls[1]:.2f} "
                                   f"ring={curls[2]:.2f} little={curls[3]:.2f}")
+                            tw = h.get("twist", 0)
+                            tw_n = _hand_twist_neutral.get(side, 0)
+                            print(f"  hand[{side}]: {curl_str} twist_delta={tw:+.2f} (neutral={tw_n:.2f})")
                         else:
                             print(f"  hand[{side}]: not detected")
             sys.stdout.write("\r" + line.ljust(100))

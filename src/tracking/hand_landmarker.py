@@ -119,6 +119,28 @@ def _compute_finger_angles(pts: np.ndarray) -> dict[str, list[float]]:
     }
 
 
+def _compute_palm_twist(pts: np.ndarray, is_left: bool) -> float:
+    """Pronation/supination from palm normal vertical component.
+
+    Returns angle in [-pi/2, +pi/2]:
+      0     = palm sideways
+      +pi/2 = palm up
+      -pi/2 = palm down
+    """
+    v1 = pts[_INDEX_MCP] - pts[_WRIST]
+    v2 = pts[_LITTLE_MCP] - pts[_WRIST]
+    normal = np.cross(v1, v2)
+    n = np.linalg.norm(normal)
+    if n < 1e-8:
+        return 0.0
+    normal = normal / n
+    # MediaPipe world landmarks: cross(index, little) gives opposite palm-normal
+    # directions for left vs right hands. Use same formula for both — the
+    # calibration neutral handles the per-hand baseline.
+    y = -normal[1]
+    return float(np.arcsin(np.clip(y, -1.0, 1.0)))
+
+
 def extract_hands(result: Any) -> dict[str, dict | None]:
     """Parse HandLandmarkerResult into per-hand finger angles.
 
@@ -156,6 +178,7 @@ def extract_hands(result: Any) -> dict[str, dict | None]:
 
         out[side] = {
             "fingers": _compute_finger_angles(pts),
+            "twist": _compute_palm_twist(pts, is_left=(side == "left")),
         }
 
     return out

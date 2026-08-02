@@ -284,6 +284,24 @@ function _applyHands(hands) {
     const hand = hands?.[side];
     const sign = side === "left" ? -1 : 1;
 
+    // Palm twist (pronation/supination) on the hand bone — X axis.
+    // VRM hand bones are NOT mirrored: same X rotation → same palm direction.
+    // Cross product gives opposite-sign twist for L/R hands, so `OFFSET - twist`
+    // produces correct mirrored palm motion on both hands.
+    const handBone = _getBone(side === "left" ? "leftHand" : "rightHand");
+    if (handBone) {
+      const twistKey = side + "_twist";
+      let twist = hand?.twist;
+      if (twist == null) {
+        twist = (window._lastTwist ??= {})[twistKey] ?? 0;
+      } else {
+        (window._lastTwist ??= {})[twistKey] = twist;
+      }
+      const OFFSET = 1.8;
+      const final = Math.max(-2.5, Math.min(2.5, OFFSET - twist));
+      handBone.rotation.set(final, 0, 0);
+    }
+
     // Per-joint finger angles
     for (const fingerName of _FINGER_NAMES) {
       const bones = _HAND_BONES[side][fingerName];
@@ -295,9 +313,9 @@ function _applyHands(hands) {
         const flex = angles[j] ?? 0;
         const angle = sign * flex * (maxAngles[j] ?? 1.1);
         if (fingerName === "thumb") {
-          bone.rotation.set(0, -angle, 0);
+          bone.rotation.set(0, angle, 0);
         } else {
-          bone.rotation.set(0, 0, angle);
+          bone.rotation.set(0, 0, -angle);
         }
       }
     }
