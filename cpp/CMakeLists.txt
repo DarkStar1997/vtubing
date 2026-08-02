@@ -20,7 +20,13 @@ FetchContent_Declare(glm
     GIT_REPOSITORY https://github.com/g-truc/glm.git
     GIT_TAG 1.0.3
     GIT_SHALLOW TRUE)
-FetchContent_MakeAvailable(glm)
+
+FetchContent_Declare(bs_thread_pool
+    GIT_REPOSITORY https://github.com/bshoshany/thread-pool.git
+    GIT_TAG v5.0.0
+    GIT_SHALLOW TRUE)
+
+FetchContent_MakeAvailable(glm bs_thread_pool)
 
 # cgltf + stb are single-header libraries — download directly
 set(THIRD_PARTY_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
@@ -45,7 +51,8 @@ add_executable(vtuber_cpu
 
 target_include_directories(vtuber_cpu PRIVATE
     src
-    ${THIRD_PARTY_DIR})
+    ${THIRD_PARTY_DIR}
+    ${bs_thread_pool_SOURCE_DIR}/include)
 
 target_link_libraries(vtuber_cpu PRIVATE SDL3::SDL3 glm::glm)
 

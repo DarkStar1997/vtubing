@@ -1,11 +1,17 @@
 #include "rasterizer.h"
+#include "BS_thread_pool.hpp"
 #include <cmath>
 #include <algorithm>
 #include <cstdio>
 #include <functional>
 #include <limits>
-#include <thread>
 #include <atomic>
+
+// Persistent thread pool — created once, reused every frame
+static BS::thread_pool<>& getThreadPool() {
+    static BS::thread_pool<> pool;
+    return pool;
+}
 
 Framebuffer::Framebuffer(int w, int h)
     : width(w), height(h), color(w * h * 4, 0), depth(w * h, 1.0f) {}
@@ -386,11 +392,10 @@ std::vector<ProcessedMesh> processVerticesParallel(
             }
         };
 
-        std::vector<std::thread> threads;
-        for (int t = 1; t < numThreads; t++)
-            threads.emplace_back(worker);
-        worker(); // main thread also works
-        for (auto& th : threads) th.join();
+        auto& pool = getThreadPool();
+        for (int t = 0; t < numThreads; t++)
+            pool.detach_task(worker);
+        pool.wait();
     }
 
     return result;
@@ -426,12 +431,12 @@ void rasterizeParallel(
             rasterizePrim(*allPrims[i], fb, textures, yStart, yEnd);
     };
 
-    std::vector<std::thread> threads;
+    auto& pool = getThreadPool();
     for (int t = 0; t < numThreads; t++) {
         int yStart = t * bandHeight;
         int yEnd = std::min(yStart + bandHeight, fb.height);
         if (yStart >= yEnd) break;
-        threads.emplace_back(rasterizeBand, yStart, yEnd);
+        pool.detach_task([&, yStart, yEnd]() { rasterizeBand(yStart, yEnd); });
     }
-    for (auto& th : threads) th.join();
+    pool.wait();
 }
