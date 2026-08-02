@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <functional>
 #include <limits>
+#include <thread>
 #include <immintrin.h>
 
 Framebuffer::Framebuffer(int w, int h)
@@ -272,7 +273,8 @@ void rasterizePrim(
 void rasterizePrimSIMD(
     const ProcessedPrim& pp,
     Framebuffer& fb,
-    const std::vector<TextureData>& textures)
+    const std::vector<TextureData>& textures,
+    int yMin, int yMax)
 {
     const MeshPrimitive& prim = *pp.prim;
     const uint32_t* indices = prim.indices.data();
@@ -316,8 +318,9 @@ void rasterizePrimSIMD(
 
         int ix0 = static_cast<int>(minX);
         int ix1 = static_cast<int>(maxX);
-        int iy0 = static_cast<int>(minY);
-        int iy1 = static_cast<int>(maxY);
+        int iy0 = std::max(static_cast<int>(minY), yMin);
+        int iy1 = std::min(static_cast<int>(maxY), yMax - 1);
+        if (iy1 < iy0) continue;
 
         float invArea = 1.0f / area;
 
@@ -475,4 +478,143 @@ void rasterizePrimSIMD(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Parallel vertex processing
+// ---------------------------------------------------------------------------
+std::vector<ProcessedMesh> processVerticesParallel(
+    const VRMModel& model,
+    const std::vector<glm::mat4>& jointMatrices,
+    const glm::mat4& viewProj,
+    const std::vector<float>& morphWeights,
+    int fbWidth, int fbHeight,
+    int numThreads)
+{
+    std::vector<ProcessedMesh> result(model.meshes.size());
+    int numMeshes = static_cast<int>(model.meshes.size());
+
+    auto processRange = [&](int meshStart, int meshEnd) {
+        for (int mi = meshStart; mi < meshEnd; mi++) {
+            const auto& mesh = model.meshes[mi];
+            result[mi].prims.resize(mesh.primitives.size());
+
+            for (size_t pi = 0; pi < mesh.primitives.size(); pi++) {
+                const auto& prim = mesh.primitives[pi];
+                int vc = prim.vertexCount();
+                auto& pp = result[mi].prims[pi];
+                pp.prim = &prim;
+                pp.screenX.resize(vc);
+                pp.screenY.resize(vc);
+                pp.clipZ.resize(vc);
+                pp.uvU.resize(vc);
+                pp.uvV.resize(vc);
+
+                int weightBase = 0;
+                for (int mj = 0; mj < mi; mj++) {
+                    if (!model.meshes[mj].primitives.empty())
+                        weightBase += model.meshes[mj].primitives[0].morphCount;
+                }
+
+                for (int v = 0; v < vc; v++) {
+                    glm::vec3 pos(prim.positions[v * 3], prim.positions[v * 3 + 1], prim.positions[v * 3 + 2]);
+                    if (prim.morphCount > 0) {
+                        for (int t = 0; t < prim.morphCount; t++) {
+                            float w = morphWeights[weightBase + t];
+                            if (w > 0.0f) {
+                                pos.x += prim.morphDeltas[(t * vc + v) * 3 + 0] * w;
+                                pos.y += prim.morphDeltas[(t * vc + v) * 3 + 1] * w;
+                                pos.z += prim.morphDeltas[(t * vc + v) * 3 + 2] * w;
+                            }
+                        }
+                    }
+
+                    glm::vec4 skinned(0);
+                    if (!prim.weights.empty() && !jointMatrices.empty()) {
+                        uint16_t j0 = prim.joints[v * 4 + 0];
+                        uint16_t j1 = prim.joints[v * 4 + 1];
+                        uint16_t j2 = prim.joints[v * 4 + 2];
+                        uint16_t j3 = prim.joints[v * 4 + 3];
+                        float w0 = prim.weights[v * 4 + 0];
+                        float w1 = prim.weights[v * 4 + 1];
+                        float w2 = prim.weights[v * 4 + 2];
+                        float w3 = prim.weights[v * 4 + 3];
+                        glm::vec4 hp(pos, 1.0f);
+                        skinned = (jointMatrices[j0] * hp) * w0;
+                        skinned += (jointMatrices[j1] * hp) * w1;
+                        skinned += (jointMatrices[j2] * hp) * w2;
+                        skinned += (jointMatrices[j3] * hp) * w3;
+                    } else {
+                        skinned = glm::vec4(pos, 1.0f);
+                    }
+
+                    glm::vec4 clip = viewProj * skinned;
+                    float w = clip.w;
+                    if (w <= 0.0f) w = 1e-10f;
+                    float invW = 1.0f / w;
+
+                    pp.screenX[v] = (clip.x * invW * 0.5f + 0.5f) * fbWidth;
+                    pp.screenY[v] = (1.0f - (clip.y * invW * 0.5f + 0.5f)) * fbHeight;
+                    pp.clipZ[v] = clip.z * invW;
+                    pp.uvU[v] = prim.uvs.empty() ? 0 : prim.uvs[v * 2];
+                    pp.uvV[v] = prim.uvs.empty() ? 0 : prim.uvs[v * 2 + 1];
+                }
+            }
+        }
+    };
+
+    if (numThreads <= 1 || numMeshes <= 1) {
+        processRange(0, numMeshes);
+    } else {
+        int nt = std::min(numThreads, numMeshes);
+        std::vector<std::thread> threads;
+        int perThread = (numMeshes + nt - 1) / nt;
+        for (int t = 0; t < nt; t++) {
+            int start = t * perThread;
+            int end = std::min(start + perThread, numMeshes);
+            if (start >= end) break;
+            threads.emplace_back(processRange, start, end);
+        }
+        for (auto& th : threads) th.join();
+    }
+
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Parallel rasterization (horizontal bands)
+// ---------------------------------------------------------------------------
+void rasterizeParallel(
+    const std::vector<ProcessedMesh>& processed,
+    Framebuffer& fb,
+    const std::vector<TextureData>& textures,
+    int numThreads)
+{
+    if (numThreads <= 1) {
+        for (size_t mi = 0; mi < processed.size(); mi++) {
+            for (size_t pi = 0; pi < processed[mi].prims.size(); pi++) {
+                rasterizePrimSIMD(processed[mi].prims[pi], fb, textures);
+            }
+        }
+        return;
+    }
+
+    int bandHeight = (fb.height + numThreads - 1) / numThreads;
+
+    auto rasterizeBand = [&](int yStart, int yEnd) {
+        for (size_t mi = 0; mi < processed.size(); mi++) {
+            for (size_t pi = 0; pi < processed[mi].prims.size(); pi++) {
+                rasterizePrimSIMD(processed[mi].prims[pi], fb, textures, yStart, yEnd);
+            }
+        }
+    };
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < numThreads; t++) {
+        int yStart = t * bandHeight;
+        int yEnd = std::min(yStart + bandHeight, fb.height);
+        if (yStart >= yEnd) break;
+        threads.emplace_back(rasterizeBand, yStart, yEnd);
+    }
+    for (auto& th : threads) th.join();
 }

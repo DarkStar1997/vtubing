@@ -62,7 +62,27 @@ void rasterizePrim(
     const std::vector<TextureData>& textures);
 
 // Rasterize using AVX2 SIMD (8 pixels/iteration)
+// yMin/yMax clip the scanline range (for parallel band rasterization)
 void rasterizePrimSIMD(
     const ProcessedPrim& pp,
     Framebuffer& fb,
-    const std::vector<TextureData>& textures);
+    const std::vector<TextureData>& textures,
+    int yMin = 0, int yMax = 0x7FFFFFFF);
+
+// --- Multithreaded variants ---
+
+// Parallel vertex processing: splits meshes across numThreads threads
+std::vector<ProcessedMesh> processVerticesParallel(
+    const VRMModel& model,
+    const std::vector<glm::mat4>& jointMatrices,
+    const glm::mat4& viewProj,
+    const std::vector<float>& morphWeights,
+    int fbWidth, int fbHeight,
+    int numThreads);
+
+// Parallel rasterization: splits framebuffer into horizontal bands
+void rasterizeParallel(
+    const std::vector<ProcessedMesh>& processed,
+    Framebuffer& fb,
+    const std::vector<TextureData>& textures,
+    int numThreads);

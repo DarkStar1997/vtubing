@@ -9,6 +9,7 @@
 #include <cstring>
 #include <cmath>
 #include <vector>
+#include <thread>
 
 int main(int argc, char** argv) {
     std::string vrmPath = "../../assets/avatars/male_52blendshapes.vrm";
@@ -67,25 +68,24 @@ int main(int argc, char** argv) {
     Framebuffer fb(fbWidth, fbHeight);
 
     // --- Render one frame and time it ---
+    int numThreads = std::min((int)std::thread::hardware_concurrency(), 16);
+    fprintf(stderr, "[main] threads: %d\n", numThreads);
+
     Timer timer;
 
-    // Step 1: Vertex processing
+    // Step 1: Vertex processing (parallel)
     timer.reset();
-    auto processed = processVertices(model, jointMatrices, viewProj, morphWeights, fbWidth, fbHeight);
+    auto processed = processVerticesParallel(model, jointMatrices, viewProj, morphWeights, fbWidth, fbHeight, numThreads);
     double vertexMs = timer.elapsedMs();
 
-    // Step 2: Rasterization
+    // Step 2: Rasterization (parallel bands)
     timer.reset();
     fb.clear();
-    for (size_t mi = 0; mi < processed.size(); mi++) {
-        for (size_t pi = 0; pi < processed[mi].prims.size(); pi++) {
-            rasterizePrimSIMD(processed[mi].prims[pi], fb, model.textures);
-        }
-    }
+    rasterizeParallel(processed, fb, model.textures, numThreads);
     double rasterMs = timer.elapsedMs();
     double totalMs = vertexMs + rasterMs;
 
-    fprintf(stderr, "\n=== AVX2 SIMD + SINGLE-THREADED ===\n");
+    fprintf(stderr, "\n=== AVX2 SIMD + MULTITHREADED (%d threads) ===\n", numThreads);
     fprintf(stderr, "Vertex processing: %.2f ms\n", vertexMs);
     fprintf(stderr, "Rasterization:     %.2f ms\n", rasterMs);
     fprintf(stderr, "Total:             %.2f ms (%.1f fps)\n", totalMs, 1000.0 / totalMs);
