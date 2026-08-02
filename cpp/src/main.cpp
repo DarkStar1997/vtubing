@@ -33,35 +33,27 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // --- Camera setup: frame upper body ---
-    glm::vec3 center = (model.bboxMin + model.bboxMax) * 0.5f;
-    glm::vec3 size = model.bboxMax - model.bboxMin;
-    float modelHeight = size.y;
+    // --- Compute joint matrices (bind pose, no bone overrides) ---
+    std::vector<glm::mat4> worldMatrices = computeWorldMatrices(model);
+    std::vector<glm::mat4> jointMatrices = computeJointMatrices(model, worldMatrices);
 
-    // Target: upper third of the body (bust shot)
-    float targetY = center.y + size.y * 0.15f;
-    float fovY = glm::radians(35.0f);
-    float aspect = (float)fbWidth / fbHeight;
-    float nearZ = 0.1f;
-    float farZ = 100.0f;
+    // --- Camera: match Python renderer (head-relative) ---
+    glm::vec3 headPos(0.0f, 1.5f, 0.0f);  // fallback
+    if (model.headNodeIndex >= 0 && model.headNodeIndex < (int)worldMatrices.size()) {
+        headPos = glm::vec3(worldMatrices[model.headNodeIndex][3]);
+    }
 
-    // Position camera for bust shot (upper ~35% of body)
-    float dist = modelHeight * 0.35f / tanf(fovY * 0.5f);
-    glm::vec3 eye(center.x, targetY, center.z - dist);
-    glm::vec3 target(center.x, targetY, center.z);
+    glm::vec3 eye = headPos + glm::vec3(0.0f, 0.05f, -1.3f);
+    glm::vec3 target = headPos + glm::vec3(0.0f, -0.18f, 0.0f);
     glm::vec3 up(0, 1, 0);
+    float fovY = glm::radians(28.0f);
+    float aspect = (float)fbWidth / fbHeight;
+    float nearZ = 0.05f;
+    float farZ = 100.0f;
 
     glm::mat4 proj = glm::perspective(fovY, aspect, nearZ, farZ);
     glm::mat4 view = glm::lookAt(eye, target, up);
     glm::mat4 viewProj = proj * view;
-
-    fprintf(stderr, "[main] camera: eye=(%.2f,%.2f,%.2f) dist=%.2f\n",
-            eye.x, eye.y, eye.z, dist);
-    fprintf(stderr, "[main] model height: %.2f\n", modelHeight);
-
-    // --- Compute joint matrices (bind pose, no bone overrides) ---
-    std::vector<glm::mat4> worldMatrices = computeWorldMatrices(model);
-    std::vector<glm::mat4> jointMatrices = computeJointMatrices(model, worldMatrices);
 
     // --- Morph weights (flat array, one weight per morph target per mesh) ---
     std::vector<float> morphWeights;

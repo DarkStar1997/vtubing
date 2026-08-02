@@ -67,6 +67,8 @@ struct VRMModel {
     glm::vec3 bboxMin = {0, 0, 0};
     glm::vec3 bboxMax = {0, 0, 0};
 
+    int headNodeIndex = -1;             // VRM humanoid "head" bone node
+
     int totalTriangles() const;
     int totalVertices() const;
 };

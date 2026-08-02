@@ -241,7 +241,7 @@ static inline void rasterizeTri(
     Framebuffer& fb,
     const std::vector<TextureData>& textures,
     int xMin, int xMax, int yMin, int yMax,
-    bool depthTest, bool doubleSided)
+    bool depthTest, bool depthWrite, bool doubleSided)
 {
     const uint32_t* indices = prim.indices.data();
     uint32_t i0 = indices[triIdx * 3 + 0];
@@ -260,14 +260,14 @@ static inline void rasterizeTri(
     float n1x = pp.worldNX[i1], n1y = pp.worldNY[i1], n1z = pp.worldNZ[i1];
     float n2x = pp.worldNX[i2], n2y = pp.worldNY[i2], n2z = pp.worldNZ[i2];
 
-    // Backface culling. Screen Y is inverted vs OpenGL NDC (Y-up),
-    // so CCW front-facing = area < 0 here, CW back-facing = area > 0.
+    // Backface culling. Python uses flip_y=True (negated proj[1][1]) + front_face='ccw'.
+    // With flip_y, CW-world triangles become CCW in NDC → front-facing → rendered.
+    // In C++'s Y-down screen space, CW-world → area > 0, CCW-world → area < 0.
+    // So: cull area < 0 (CCW-world = back-facing in Python's flip_y setup).
     float area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
-    if (area > 0) {           // back-facing
+    if (area < 0) {           // back-facing for single-sided meshes
         if (!doubleSided) return;
-    }
-    // Ensure area > 0 for consistent edge-function rasterization
-    if (area < 0) {           // front-facing: swap to make area positive
+        // Double-sided: flip winding to make area positive
         std::swap(x1, x2); std::swap(y1, y2); std::swap(z1, z2);
         std::swap(u1, u2); std::swap(v1uv, v2uv);
         std::swap(n1x, n2x); std::swap(n1y, n2y); std::swap(n1z, n2z);
@@ -320,7 +320,7 @@ static inline void rasterizeTri(
                 float z = b0 * z0 + b1 * z1 + b2 * z2;
 
                 if (!depthTest || z < fb.depth[pixIdx]) {
-                    fb.depth[pixIdx] = z;
+                    if (depthWrite) fb.depth[pixIdx] = z;
 
                     // Lambertian diffuse lighting
                     float nx = b0 * n0x + b1 * n1x + b2 * n2x;
@@ -340,16 +340,32 @@ static inline void rasterizeTri(
                     if (texPixels) {
                         float u = b0 * u0 + b1 * u1 + b2 * u2;
                         float v = b0 * v0uv + b1 * v1uv + b2 * v2uv;
-                        u = std::max(0.0f, std::min(1.0f, u));
-                        v = std::max(0.0f, std::min(1.0f, v));
-                        int tx = static_cast<int>(u * texW);
-                        int ty = static_cast<int>(v * texH);
-                        if (tx >= texW) tx = texW - 1;
-                        if (ty >= texH) ty = texH - 1;
-                        const uint8_t* tpx = &texPixels[(ty * texW + tx) * 4];
-                        fb.color[pixIdx * 4 + 0] = (uint8_t)std::min(255.0f, tpx[0] * fr);
-                        fb.color[pixIdx * 4 + 1] = (uint8_t)std::min(255.0f, tpx[1] * fg);
-                        fb.color[pixIdx * 4 + 2] = (uint8_t)std::min(255.0f, tpx[2] * fb_);
+                        // Bilinear filtering (GL_LINEAR / CLAMP_TO_EDGE)
+                        float fx = u * texW - 0.5f;
+                        float fy = v * texH - 0.5f;
+                        int tx0 = (int)floorf(fx);
+                        int ty0 = (int)floorf(fy);
+                        float wx = fx - tx0;
+                        float wy = fy - ty0;
+                        int tx1 = tx0 + 1, ty1 = ty0 + 1;
+                        tx0 = std::max(0, std::min(tx0, texW - 1));
+                        tx1 = std::max(0, std::min(tx1, texW - 1));
+                        ty0 = std::max(0, std::min(ty0, texH - 1));
+                        ty1 = std::max(0, std::min(ty1, texH - 1));
+                        const uint8_t *t00 = &texPixels[(ty0 * texW + tx0) * 4];
+                        const uint8_t *t01 = &texPixels[(ty0 * texW + tx1) * 4];
+                        const uint8_t *t10 = &texPixels[(ty1 * texW + tx0) * 4];
+                        const uint8_t *t11 = &texPixels[(ty1 * texW + tx1) * 4];
+                        float w00 = (1 - wx) * (1 - wy);
+                        float w01 = wx * (1 - wy);
+                        float w10 = (1 - wx) * wy;
+                        float w11 = wx * wy;
+                        float tr = t00[0] * w00 + t01[0] * w01 + t10[0] * w10 + t11[0] * w11;
+                        float tg = t00[1] * w00 + t01[1] * w01 + t10[1] * w10 + t11[1] * w11;
+                        float tb = t00[2] * w00 + t01[2] * w01 + t10[2] * w10 + t11[2] * w11;
+                        fb.color[pixIdx * 4 + 0] = (uint8_t)std::min(255.0f, tr * fr);
+                        fb.color[pixIdx * 4 + 1] = (uint8_t)std::min(255.0f, tg * fg);
+                        fb.color[pixIdx * 4 + 2] = (uint8_t)std::min(255.0f, tb * fb_);
                     } else {
                         fb.color[pixIdx * 4 + 0] = (uint8_t)std::min(255.0f, fr * 255.0f);
                         fb.color[pixIdx * 4 + 1] = (uint8_t)std::min(255.0f, fg * 255.0f);
@@ -371,13 +387,13 @@ static void rasterizePrim(
     Framebuffer& fb,
     const std::vector<TextureData>& textures,
     int yMin, int yMax,
-    bool depthTest, bool doubleSided)
+    bool depthTest, bool depthWrite, bool doubleSided)
 {
     const MeshPrimitive& prim = *pp.prim;
     int numTris = prim.triangleCount();
     for (int t = 0; t < numTris; t++)
         rasterizeTri(pp, prim, t, fb, textures, 0, fb.width - 1, yMin, yMax - 1,
-                     depthTest, doubleSided);
+                     depthTest, depthWrite, doubleSided);
 }
 
 // ---------------------------------------------------------------------------
@@ -538,7 +554,7 @@ static void rasterizePassTiles(
     Framebuffer& fb,
     const std::vector<TextureData>& textures,
     int numThreads,
-    bool depthTest, bool doubleSided)
+    bool depthTest, bool depthWrite, bool doubleSided)
 {
     const int TILE = 64;
     int tilesX = (fb.width + TILE - 1) / TILE;
@@ -587,7 +603,7 @@ static void rasterizePassTiles(
             for (auto& tr : bin)
                 rasterizeTri(*tr.pp, *tr.pp->prim, tr.triIdx, fb, textures,
                              xStart, xEnd - 1, yStart, yEnd - 1,
-                             depthTest, doubleSided);
+                             depthTest, depthWrite, doubleSided);
         }
     };
 
@@ -636,15 +652,16 @@ void rasterizeParallel(
             j++;
 
         bool depthTest = (currentOrder != 2);
+        bool depthWrite = (currentOrder != 2);
         bool doubleSided = (currentOrder == 0);
 
         if (numThreads <= 1) {
             for (int k = i; k < j; k++)
                 rasterizePrim(*entries[k].pp, fb, textures, 0, 0x7FFFFFFF,
-                              depthTest, doubleSided);
+                              depthTest, depthWrite, doubleSided);
         } else {
             rasterizePassTiles(entries.data(), i, j, fb, textures, numThreads,
-                               depthTest, doubleSided);
+                               depthTest, depthWrite, doubleSided);
         }
 
         i = j;

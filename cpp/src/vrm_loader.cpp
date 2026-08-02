@@ -71,6 +71,48 @@ VRMModel loadVRM(const std::string& path) {
         cgltf_free(data);
         return model;
     }
+    // Find head node from VRM humanoid extension
+    for (cgltf_size i = 0; i < data->data_extensions_count; i++) {
+        const cgltf_extension* ext = &data->data_extensions[i];
+        if (!ext->name || !ext->data) continue;
+        std::string ename(ext->name);
+        if (ename != "VRM" && ename != "VRMC_vrm") continue;
+        std::string d(ext->data);
+
+        if (ename == "VRM") {
+            // VRM 0.x: humanoid.humanBones is array of {"bone":"head","node":N}
+            size_t pos = 0;
+            while ((pos = d.find("\"bone\"", pos)) != std::string::npos) {
+                size_t vc = d.find('"', d.find(':', pos) + 1);
+                size_t ve = d.find('"', vc + 1);
+                if (vc == std::string::npos || ve == std::string::npos) break;
+                std::string bn = d.substr(vc + 1, ve - vc - 1);
+                size_t objEnd = d.find('}', ve);
+                if (bn == "head") {
+                    size_t np = d.find("\"node\"", ve);
+                    if (np != std::string::npos && np < objEnd) {
+                        size_t ns = d.find_first_of("0123456789", d.find(':', np));
+                        size_t ne = d.find_first_not_of("0123456789", ns);
+                        model.headNodeIndex = std::stoi(d.substr(ns, ne - ns));
+                        break;
+                    }
+                }
+                pos = ve + 1;
+            }
+        } else {
+            // VRM 1.0: humanBones is dict {"head":{"node":N}}
+            size_t hp = d.find("\"head\"");
+            if (hp != std::string::npos) {
+                size_t np = d.find("\"node\"", hp);
+                if (np != std::string::npos) {
+                    size_t ns = d.find_first_of("0123456789", d.find(':', np));
+                    size_t ne = d.find_first_not_of("0123456789", ns);
+                    model.headNodeIndex = std::stoi(d.substr(ns, ne - ns));
+                }
+            }
+        }
+        if (model.headNodeIndex >= 0) break;
+    }
 
     // --- Nodes ---
     model.nodes.resize(data->nodes_count);
