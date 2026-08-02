@@ -5,6 +5,7 @@
 #include <functional>
 #include <limits>
 #include <thread>
+#include <atomic>
 
 Framebuffer::Framebuffer(int w, int h)
     : width(w), height(h), color(w * h * 4, 0), depth(w * h, 1.0f) {}
@@ -280,24 +281,23 @@ std::vector<ProcessedMesh> processVerticesParallel(
     int numThreads)
 {
     std::vector<ProcessedMesh> result(model.meshes.size());
-    int numMeshes = static_cast<int>(model.meshes.size());
 
-    // --- Phase 1: Pre-allocate all output arrays + build flat work list ---
-    struct WorkItem {
-        int meshIdx, primIdx, vertStart, vertEnd, weightBase;
+    // --- Phase 1: Pre-allocate + build flat arrays for cache-friendly access ---
+    struct PrimInfo {
+        const MeshPrimitive* prim;
+        ProcessedPrim* pp;
+        int weightBase;
     };
-    std::vector<WorkItem> workItems;
+    std::vector<PrimInfo> primsFlat;
 
-    for (int mi = 0; mi < numMeshes; mi++) {
+    for (size_t mi = 0; mi < model.meshes.size(); mi++) {
         const auto& mesh = model.meshes[mi];
         result[mi].prims.resize(mesh.primitives.size());
-
         int weightBase = 0;
-        for (int mj = 0; mj < mi; mj++) {
+        for (size_t mj = 0; mj < mi; mj++) {
             if (!model.meshes[mj].primitives.empty())
                 weightBase += model.meshes[mj].primitives[0].morphCount;
         }
-
         for (size_t pi = 0; pi < mesh.primitives.size(); pi++) {
             const auto& prim = mesh.primitives[pi];
             int vc = prim.vertexCount();
@@ -308,43 +308,39 @@ std::vector<ProcessedMesh> processVerticesParallel(
             pp.clipZ.resize(vc);
             pp.uvU.resize(vc);
             pp.uvV.resize(vc);
-
-            // Split large prims into ~1024-vertex chunks for better load balancing
-            const int CHUNK = 1024;
-            for (int v = 0; v < vc; v += CHUNK) {
-                workItems.push_back({mi, (int)pi, v, std::min(v + CHUNK, vc), weightBase});
-            }
+            primsFlat.push_back({&prim, &pp, weightBase});
         }
     }
 
-    // --- Phase 2: Process work items in parallel ---
-    auto processVertex = [&](
-        const MeshPrimitive& prim, ProcessedPrim& pp,
-        int v, int weightBase)
-    {
+    const int numPrims = static_cast<int>(primsFlat.size());
+    const glm::mat4* jm = jointMatrices.data();
+
+    // --- Phase 2: Parallel vertex processing with lock-free work queue ---
+    auto processPrimVertices = [&](const PrimInfo& info, int v) {
+        const MeshPrimitive& prim = *info.prim;
+        ProcessedPrim& pp = *info.pp;
         int vc = prim.vertexCount();
+
         glm::vec3 pos(prim.positions[v * 3], prim.positions[v * 3 + 1], prim.positions[v * 3 + 2]);
         if (prim.morphCount > 0) {
             for (int t = 0; t < prim.morphCount; t++) {
-                float w = morphWeights[weightBase + t];
+                float w = morphWeights[info.weightBase + t];
                 if (w > 0.0f) {
-                    pos.x += prim.morphDeltas[(t * vc + v) * 3 + 0] * w;
-                    pos.y += prim.morphDeltas[(t * vc + v) * 3 + 1] * w;
-                    pos.z += prim.morphDeltas[(t * vc + v) * 3 + 2] * w;
+                    const float* dp = &prim.morphDeltas[(t * vc + v) * 3];
+                    pos.x += dp[0] * w;
+                    pos.y += dp[1] * w;
+                    pos.z += dp[2] * w;
                 }
             }
         }
 
-        glm::vec4 skinned(0);
-        if (!prim.weights.empty() && !jointMatrices.empty()) {
-            glm::vec4 hp(pos, 1.0f);
-            skinned  = (jointMatrices[prim.joints[v * 4 + 0]] * hp) * prim.weights[v * 4 + 0];
-            skinned += (jointMatrices[prim.joints[v * 4 + 1]] * hp) * prim.weights[v * 4 + 1];
-            skinned += (jointMatrices[prim.joints[v * 4 + 2]] * hp) * prim.weights[v * 4 + 2];
-            skinned += (jointMatrices[prim.joints[v * 4 + 3]] * hp) * prim.weights[v * 4 + 3];
-        } else {
-            skinned = glm::vec4(pos, 1.0f);
-        }
+        const uint16_t* j = &prim.joints[v * 4];
+        const float* wt = &prim.weights[v * 4];
+        glm::vec4 hp(pos, 1.0f);
+        glm::vec4 skinned = (jm[j[0]] * hp) * wt[0];
+        skinned += (jm[j[1]] * hp) * wt[1];
+        skinned += (jm[j[2]] * hp) * wt[2];
+        skinned += (jm[j[3]] * hp) * wt[3];
 
         glm::vec4 clip = viewProj * skinned;
         float w = clip.w;
@@ -358,30 +354,42 @@ std::vector<ProcessedMesh> processVerticesParallel(
         pp.uvV[v] = prim.uvs.empty() ? 0 : prim.uvs[v * 2 + 1];
     };
 
-    auto processWorkRange = [&](int itemStart, int itemEnd) {
-        for (int i = itemStart; i < itemEnd; i++) {
-            auto& wi = workItems[i];
-            const auto& prim = model.meshes[wi.meshIdx].primitives[wi.primIdx];
-            auto& pp = result[wi.meshIdx].prims[wi.primIdx];
-            for (int v = wi.vertStart; v < wi.vertEnd; v++) {
-                processVertex(prim, pp, v, wi.weightBase);
-            }
+    if (numThreads <= 1) {
+        for (int pi = 0; pi < numPrims; pi++) {
+            int vc = primsFlat[pi].prim->vertexCount();
+            for (int v = 0; v < vc; v++)
+                processPrimVertices(primsFlat[pi], v);
         }
-    };
-
-    int numItems = static_cast<int>(workItems.size());
-    if (numThreads <= 1 || numItems <= 1) {
-        processWorkRange(0, numItems);
     } else {
-        int nt = std::min(numThreads, numItems);
-        std::vector<std::thread> threads;
-        int perThread = (numItems + nt - 1) / nt;
-        for (int t = 0; t < nt; t++) {
-            int start = t * perThread;
-            int end = std::min(start + perThread, numItems);
-            if (start >= end) break;
-            threads.emplace_back(processWorkRange, start, end);
+        // Build flat vertex work queue: (primIdx, vertexIdx) pairs
+        struct VertTask { int16_t primIdx; int32_t vertIdx; };
+        std::vector<VertTask> tasks;
+        const int CHUNK = 512;
+        for (int pi = 0; pi < numPrims; pi++) {
+            int vc = primsFlat[pi].prim->vertexCount();
+            for (int v = 0; v < vc; v += CHUNK)
+                tasks.push_back({(int16_t)pi, v});
         }
+
+        std::atomic<int> next{0};
+        int numTasks = static_cast<int>(tasks.size());
+
+        auto worker = [&]() {
+            while (true) {
+                int ti = next.fetch_add(1, std::memory_order_relaxed);
+                if (ti >= numTasks) break;
+                auto& task = tasks[ti];
+                int vc = primsFlat[task.primIdx].prim->vertexCount();
+                int end = std::min(task.vertIdx + CHUNK, vc);
+                for (int v = task.vertIdx; v < end; v++)
+                    processPrimVertices(primsFlat[task.primIdx], v);
+            }
+        };
+
+        std::vector<std::thread> threads;
+        for (int t = 1; t < numThreads; t++)
+            threads.emplace_back(worker);
+        worker(); // main thread also works
         for (auto& th : threads) th.join();
     }
 
@@ -397,23 +405,25 @@ void rasterizeParallel(
     const std::vector<TextureData>& textures,
     int numThreads)
 {
+    // Flatten all prims
+    const ProcessedPrim* allPrims[64];
+    int numPrims = 0;
+    for (size_t mi = 0; mi < processed.size(); mi++)
+        for (size_t pi = 0; pi < processed[mi].prims.size() && numPrims < 64; pi++)
+            allPrims[numPrims++] = &processed[mi].prims[pi];
+
     if (numThreads <= 1) {
-        for (size_t mi = 0; mi < processed.size(); mi++) {
-            for (size_t pi = 0; pi < processed[mi].prims.size(); pi++) {
-                rasterizePrim(processed[mi].prims[pi], fb, textures);
-            }
-        }
+        for (int i = 0; i < numPrims; i++)
+            rasterizePrim(*allPrims[i], fb, textures);
         return;
     }
 
+    // Static horizontal bands — simple and cache-friendly
     int bandHeight = (fb.height + numThreads - 1) / numThreads;
 
     auto rasterizeBand = [&](int yStart, int yEnd) {
-        for (size_t mi = 0; mi < processed.size(); mi++) {
-            for (size_t pi = 0; pi < processed[mi].prims.size(); pi++) {
-                rasterizePrim(processed[mi].prims[pi], fb, textures, yStart, yEnd);
-            }
-        }
+        for (int i = 0; i < numPrims; i++)
+            rasterizePrim(*allPrims[i], fb, textures, yStart, yEnd);
     };
 
     std::vector<std::thread> threads;
