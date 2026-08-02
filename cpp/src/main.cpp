@@ -79,13 +79,13 @@ int main(int argc, char** argv) {
     fb.clear();
     for (size_t mi = 0; mi < processed.size(); mi++) {
         for (size_t pi = 0; pi < processed[mi].prims.size(); pi++) {
-            rasterizePrim(processed[mi].prims[pi], fb, model.textures);
+            rasterizePrimSIMD(processed[mi].prims[pi], fb, model.textures);
         }
     }
     double rasterMs = timer.elapsedMs();
     double totalMs = vertexMs + rasterMs;
 
-    fprintf(stderr, "\n=== SCALAR BASELINE (single-threaded) ===\n");
+    fprintf(stderr, "\n=== AVX2 SIMD + SINGLE-THREADED ===\n");
     fprintf(stderr, "Vertex processing: %.2f ms\n", vertexMs);
     fprintf(stderr, "Rasterization:     %.2f ms\n", rasterMs);
     fprintf(stderr, "Total:             %.2f ms (%.1f fps)\n", totalMs, 1000.0 / totalMs);

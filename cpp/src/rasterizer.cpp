@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <functional>
 #include <limits>
+#include <immintrin.h>
 
 Framebuffer::Framebuffer(int w, int h)
     : width(w), height(h), color(w * h * 4, 0), depth(w * h, 1.0f) {}
@@ -259,6 +260,217 @@ void rasterizePrim(
                     fb.color[pixIdx * 4 + 1] = color[1];
                     fb.color[pixIdx * 4 + 2] = color[2];
                     fb.color[pixIdx * 4 + 3] = color[3];
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AVX2 SIMD rasterizer — processes 8 pixels per iteration
+// ---------------------------------------------------------------------------
+void rasterizePrimSIMD(
+    const ProcessedPrim& pp,
+    Framebuffer& fb,
+    const std::vector<TextureData>& textures)
+{
+    const MeshPrimitive& prim = *pp.prim;
+    const uint32_t* indices = prim.indices.data();
+    int numTris = prim.triangleCount();
+    bool hasTex = prim.textureIndex >= 0 && prim.textureIndex < (int)textures.size();
+    const TextureData* tex = hasTex ? &textures[prim.textureIndex] : nullptr;
+
+    // Constants
+    const __m256 v_zero = _mm256_setzero_ps();
+    const __m256 v_one  = _mm256_set1_ps(1.0f);
+    const __m256i v_inc = _mm256_setr_epi32(0,1,2,3,4,5,6,7);
+    const __m256 v_inc_f = _mm256_cvtepi32_ps(v_inc);
+
+    for (int t = 0; t < numTris; t++) {
+        uint32_t i0 = indices[t * 3 + 0];
+        uint32_t i1 = indices[t * 3 + 1];
+        uint32_t i2 = indices[t * 3 + 2];
+
+        float x0 = pp.screenX[i0], y0 = pp.screenY[i0], z0 = pp.clipZ[i0];
+        float x1 = pp.screenX[i1], y1 = pp.screenY[i1], z1 = pp.clipZ[i1];
+        float x2 = pp.screenX[i2], y2 = pp.screenY[i2], z2 = pp.clipZ[i2];
+        float u0 = pp.uvU[i0], v0uv = pp.uvV[i0];
+        float u1 = pp.uvU[i1], v1uv = pp.uvV[i1];
+        float u2 = pp.uvU[i2], v2uv = pp.uvV[i2];
+
+        // Backface culling
+        float area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+        if (area < 0) {
+            if (!prim.doubleSided) continue;
+            std::swap(x1, x2); std::swap(y1, y2); std::swap(z1, z2);
+            std::swap(u1, u2); std::swap(v1uv, v2uv);
+            area = -area;
+        }
+        if (area < 0.01f) continue;
+
+        float minX = std::max(0.0f, std::min({x0, x1, x2}));
+        float maxX = std::min((float)fb.width - 1, std::max({x0, x1, x2}));
+        float minY = std::max(0.0f, std::min({y0, y1, y2}));
+        float maxY = std::min((float)fb.height - 1, std::max({y0, y1, y2}));
+        if (maxX < minX || maxY < minY) continue;
+
+        int ix0 = static_cast<int>(minX);
+        int ix1 = static_cast<int>(maxX);
+        int iy0 = static_cast<int>(minY);
+        int iy1 = static_cast<int>(maxY);
+
+        float invArea = 1.0f / area;
+
+        // Edge function is linear in fx: e(fx) = C + D*fx
+        // de0/dx = -(y2-y1), etc.
+        float step0 = -(y2 - y1);
+        float step1 = -(y0 - y2);
+        float step2 = -(y1 - y0);
+
+        __m256 v_step0 = _mm256_set1_ps(step0);
+        __m256 v_step1 = _mm256_set1_ps(step1);
+        __m256 v_step2 = _mm256_set1_ps(step2);
+        __m256 v_invArea = _mm256_set1_ps(invArea);
+        __m256 v_z0 = _mm256_set1_ps(z0);
+        __m256 v_z1 = _mm256_set1_ps(z1);
+        __m256 v_z2 = _mm256_set1_ps(z2);
+
+        // UV broadcast
+        __m256 v_u0 = _mm256_set1_ps(u0), v_u1 = _mm256_set1_ps(u1), v_u2 = _mm256_set1_ps(u2);
+        __m256 v_v0 = _mm256_set1_ps(v0uv), v_v1 = _mm256_set1_ps(v1uv), v_v2 = _mm256_set1_ps(v2uv);
+
+        // Texture constants
+        __m256 v_tw = tex ? _mm256_set1_ps((float)tex->width) : v_zero;
+        __m256 v_th = tex ? _mm256_set1_ps((float)tex->height) : v_zero;
+        __m256i v_tw_m1 = tex ? _mm256_set1_epi32(tex->width - 1) : _mm256_setzero_si256();
+        __m256i v_th_m1 = tex ? _mm256_set1_epi32(tex->height - 1) : _mm256_setzero_si256();
+        __m256i v_tw_int = tex ? _mm256_set1_epi32(tex->width) : _mm256_setzero_si256();
+        const int* tex_data = tex ? reinterpret_cast<const int*>(tex->pixels.data()) : nullptr;
+
+        for (int py = iy0; py <= iy1; py++) {
+            float fy = py + 0.5f;
+            int rowBase = py * fb.width;
+
+            // --- SIMD blocks (8 pixels each) ---
+            int bx = ix0;
+            for (; bx + 7 <= ix1; bx += 8) {
+                float fxBase = bx + 0.5f;
+
+                // Edge function at first pixel center
+                float e0b = (x2 - x1) * (fy - y1) - (y2 - y1) * (fxBase - x1);
+                float e1b = (x0 - x2) * (fy - y2) - (y0 - y2) * (fxBase - x2);
+                float e2b = (x1 - x0) * (fy - y0) - (y1 - y0) * (fxBase - x0);
+
+                // Compute 8 edge values: base + step * {0..7}
+                __m256 v_e0 = _mm256_fmadd_ps(v_step0, v_inc_f, _mm256_set1_ps(e0b));
+                __m256 v_e1 = _mm256_fmadd_ps(v_step1, v_inc_f, _mm256_set1_ps(e1b));
+                __m256 v_e2 = _mm256_fmadd_ps(v_step2, v_inc_f, _mm256_set1_ps(e2b));
+
+                // Coverage mask: all edges >= 0
+                __m256 mask = _mm256_and_ps(
+                    _mm256_cmp_ps(v_e0, v_zero, _CMP_GE_OQ),
+                    _mm256_and_ps(
+                        _mm256_cmp_ps(v_e1, v_zero, _CMP_GE_OQ),
+                        _mm256_cmp_ps(v_e2, v_zero, _CMP_GE_OQ)));
+                int mmask = _mm256_movemask_ps(mask);
+                if (!mmask) continue;
+
+                // Barycentric weights
+                __m256 v_b0 = _mm256_mul_ps(v_e0, v_invArea);
+                __m256 v_b1 = _mm256_mul_ps(v_e1, v_invArea);
+                __m256 v_b2 = _mm256_mul_ps(v_e2, v_invArea);
+
+                // Interpolate Z
+                __m256 v_z = _mm256_fmadd_ps(v_b0, v_z0,
+                               _mm256_fmadd_ps(v_b1, v_z1,
+                                      _mm256_mul_ps(v_b2, v_z2)));
+
+                // Z-test via gather
+                __m256i v_pixIdx = _mm256_add_epi32(_mm256_set1_epi32(rowBase + bx), v_inc);
+                __m256 v_depth = _mm256_i32gather_ps(&fb.depth[0], v_pixIdx, 4);
+                mask = _mm256_and_ps(mask, _mm256_cmp_ps(v_z, v_depth, _CMP_LT_OQ));
+                mmask = _mm256_movemask_ps(mask);
+                if (!mmask) continue;
+
+                // Write depth + color for passing lanes
+                alignas(32) float z_arr[8];
+                _mm256_store_ps(z_arr, v_z);
+
+                if (tex_data) {
+                    // Interpolate UV
+                    __m256 v_u = _mm256_fmadd_ps(v_b0, v_u0,
+                                   _mm256_fmadd_ps(v_b1, v_u1,
+                                          _mm256_mul_ps(v_b2, v_u2)));
+                    __m256 v_v = _mm256_fmadd_ps(v_b0, v_v0,
+                                   _mm256_fmadd_ps(v_b1, v_v1,
+                                          _mm256_mul_ps(v_b2, v_v2)));
+                    // Clamp [0,1]
+                    v_u = _mm256_min_ps(_mm256_max_ps(v_u, v_zero), v_one);
+                    v_v = _mm256_min_ps(_mm256_max_ps(v_v, v_zero), v_one);
+                    // Texel coords
+                    __m256i v_tx = _mm256_cvttps_epi32(_mm256_mul_ps(v_u, v_tw));
+                    __m256i v_ty = _mm256_cvttps_epi32(_mm256_mul_ps(v_v, v_th));
+                    v_tx = _mm256_min_epi32(_mm256_max_epi32(v_tx, _mm256_setzero_si256()), v_tw_m1);
+                    v_ty = _mm256_min_epi32(_mm256_max_epi32(v_ty, _mm256_setzero_si256()), v_th_m1);
+                    // Texel offset = ty * width + tx
+                    __m256i v_off = _mm256_add_epi32(_mm256_mullo_epi32(v_ty, v_tw_int), v_tx);
+                    // Gather RGBA32 pixels
+                    __m256i v_texels = _mm256_i32gather_epi32(tex_data, v_off, 4);
+                    alignas(32) int tex_arr[8];
+                    _mm256_store_si256((__m256i*)tex_arr, v_texels);
+                    for (int lane = 0; lane < 8; lane++) {
+                        if (mmask & (1 << lane)) {
+                            int idx = rowBase + bx + lane;
+                            fb.depth[idx] = z_arr[lane];
+                            *reinterpret_cast<int*>(&fb.color[idx * 4]) = tex_arr[lane];
+                        }
+                    }
+                } else {
+                    uint8_t cr = (uint8_t)(prim.baseColor.r * 255);
+                    uint8_t cg = (uint8_t)(prim.baseColor.g * 255);
+                    uint8_t cb = (uint8_t)(prim.baseColor.b * 255);
+                    int packed = (255 << 24) | (cb << 16) | (cg << 8) | cr;
+                    for (int lane = 0; lane < 8; lane++) {
+                        if (mmask & (1 << lane)) {
+                            int idx = rowBase + bx + lane;
+                            fb.depth[idx] = z_arr[lane];
+                            *reinterpret_cast<int*>(&fb.color[idx * 4]) = packed;
+                        }
+                    }
+                }
+            }
+
+            // --- Scalar remainder ---
+            for (; bx <= ix1; bx++) {
+                float fx = bx + 0.5f;
+                float e0 = (x2 - x1) * (fy - y1) - (y2 - y1) * (fx - x1);
+                float e1 = (x0 - x2) * (fy - y2) - (y0 - y2) * (fx - x2);
+                float e2 = (x1 - x0) * (fy - y0) - (y1 - y0) * (fx - x0);
+                if (e0 < 0 || e1 < 0 || e2 < 0) continue;
+                float b0 = e0 * invArea, b1 = e1 * invArea, b2 = e2 * invArea;
+                float z = b0 * z0 + b1 * z1 + b2 * z2;
+                int idx = rowBase + bx;
+                if (z >= fb.depth[idx]) continue;
+                fb.depth[idx] = z;
+                if (tex) {
+                    float u = b0 * u0 + b1 * u1 + b2 * u2;
+                    float v = b0 * v0uv + b1 * v1uv + b2 * v2uv;
+                    u = std::max(0.0f, std::min(1.0f, u));
+                    v = std::max(0.0f, std::min(1.0f, v));
+                    int tx = (int)(u * tex->width);
+                    int ty = (int)(v * tex->height);
+                    if (tx >= tex->width) tx = tex->width - 1;
+                    if (ty >= tex->height) ty = tex->height - 1;
+                    const uint8_t* px = &tex->pixels[(ty * tex->width + tx) * 4];
+                    fb.color[idx * 4 + 0] = px[0];
+                    fb.color[idx * 4 + 1] = px[1];
+                    fb.color[idx * 4 + 2] = px[2];
+                    fb.color[idx * 4 + 3] = px[3];
+                } else {
+                    fb.color[idx * 4 + 0] = (uint8_t)(prim.baseColor.r * 255);
+                    fb.color[idx * 4 + 1] = (uint8_t)(prim.baseColor.g * 255);
+                    fb.color[idx * 4 + 2] = (uint8_t)(prim.baseColor.b * 255);
+                    fb.color[idx * 4 + 3] = 255;
                 }
             }
         }
