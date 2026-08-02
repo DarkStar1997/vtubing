@@ -52,14 +52,15 @@ Python handles webcam capture, MediaPipe tracking, and rig solving. A WebSocket 
    cd vtubing
    ```
 
-2. **Add a VRM avatar**
+2. **Download VRM models**
 
-   Place a `.vrm` file in `assets/avatars/`. A few free models:
-   - [hinzka/52blendshapes-for-VRoid-face](https://github.com/hinzka/52blendshapes-for-VRoid-face) — VRoid male/female with full 52 ARKit blendshapes
-   - [madjin/vrm-samples](https://github.com/madjin/vrm-samples) — CC0 VRoid models
-   - [VRoid Hub](https://hub.vroid.com/) — many free models (check license for redistribution)
+   ```bash
+   uv run python download_models.py
+   ```
 
-   Set the path in `config.yaml`:
+   This fetches 4 free VRM models into `assets/avatars/`, including the default `male_52blendshapes.vrm` (VRoid male with full 52 ARKit blendshapes for Perfect Sync). You only need to do this once.
+
+   Want a different model? Any `.vrm` file works — place it in `assets/avatars/` and update `config.yaml`:
    ```yaml
    avatar:
      path: assets/avatars/your_model.vrm
@@ -132,6 +133,7 @@ Models auto-download to `assets/models/` on first run (~10MB each).
 ```
 vtubing/
 ├── config.yaml              # All configuration
+├── download_models.py       # Downloads free VRM models into assets/avatars/
 ├── pyproject.toml           # Dependencies (uv virtual project)
 ├── frontend/
 │   ├── index.html           # Browser UI (canvas + webcam PiP)
