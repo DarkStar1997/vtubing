@@ -207,16 +207,62 @@ function applyFraming(framing) {
   });
 }
 
-function applyDynamicCamera(standing) {
-  if (!_sitCam || !_standCam) return;
-  const sit = 1.0 - standing;
-  const dist = _sitCam.dist * sit + _standCam.dist * standing;
-  const targetY = _sitCam.targetY * sit + _standCam.targetY * standing;
-  const fov = _sitCam.fov * sit + _standCam.fov * standing;
-  const tilt = _sitCam.tilt * sit + _standCam.tilt * standing;
-  camera.position.set(0, targetY + tilt, -dist);
-  camera.lookAt(0, targetY, 0);
-  camera.fov = fov;
+function applyDynamicCamera(standing, bodyExtent) {
+  if (!_sitCam || !_standCam || !vrm) return;
+
+  // When standing but no pose data (body_extent≈0), fall back to full body
+  const be = (bodyExtent < 0.1 && standing > 0.5) ? 3.5 : (bodyExtent ?? 0);
+
+  // bodyExtent: continuous metric in torso-length units
+  //   0 = just shoulders, 1 = to hips, 2 = to knees, 3+ = to ankles
+  const headBone = _getBone("head");
+  const hipsBone = _getBone("hips");
+  if (!headBone || !hipsBone) {
+    const frac = standing;
+    const sit = 1.0 - frac;
+    camera.position.set(0, (_sitCam.targetY * sit + _standCam.targetY * frac) + (_sitCam.tilt * sit + _standCam.tilt * frac), -(_sitCam.dist * sit + _standCam.dist * frac));
+    camera.lookAt(0, _sitCam.targetY * sit + _standCam.targetY * frac, 0);
+    camera.fov = _sitCam.fov * sit + _standCam.fov * frac;
+    camera.updateProjectionMatrix();
+    return;
+  }
+
+  const headPos = new THREE.Vector3();
+  const hipsPos = new THREE.Vector3();
+  headBone.getWorldPosition(headPos);
+  hipsBone.getWorldPosition(hipsPos);
+
+  const sceneBox = new THREE.Box3().setFromObject(vrm.scene);
+  const modelH = sceneBox.getSize(new THREE.Vector3()).y;
+  const shoulderY = headPos.y - modelH * 0.05;
+  const torsoUnit = Math.abs(hipsPos.y - shoulderY);
+  const feetY = sceneBox.min.y;
+
+  // Model bottom = shoulder - bodyExtent * torsoUnit (going down = smaller Y)
+  let modelBottomY = shoulderY - be * torsoUnit;
+  modelBottomY = Math.max(modelBottomY, feetY);
+
+  // Frame from head top to modelBottomY
+  const headTopY = headPos.y + modelH * 0.06;
+  const bodyH = headTopY - modelBottomY;
+  const centerY = (headTopY + modelBottomY) / 2;
+
+  const fov = 30;
+  const halfFov = (fov * Math.PI) / 360;
+  const dist = Math.max((bodyH * 1.1) / (2 * Math.tan(halfFov)), 0.8);
+  const tilt = 0.05;
+
+  // Blend with sit cam based on standing amount + body coverage
+  const frac = Math.min(standing + Math.max(0, be - 0.5) * 0.3, 1.0);
+  const sit = 1.0 - frac;
+  const fDist = _sitCam.dist * sit + dist * frac;
+  const fTargetY = _sitCam.targetY * sit + centerY * frac;
+  const fFov = _sitCam.fov * sit + fov * frac;
+  const fTilt = _sitCam.tilt * sit + tilt * frac;
+
+  camera.position.set(0, fTargetY + fTilt, -fDist);
+  camera.lookAt(0, fTargetY, 0);
+  camera.fov = fFov;
   camera.updateProjectionMatrix();
 }
 
@@ -367,7 +413,8 @@ function animate() {
   if (vrm) {
     if (latestRig?.framing) applyFraming(latestRig.framing);
     const standing = latestRig?.pose?.standing ?? 0;
-    applyDynamicCamera(standing);
+    const bodyExtent = latestRig?.pose?.body_extent ?? 0;
+    applyDynamicCamera(standing, bodyExtent);
     _applyPose(vrm, latestRig?.pose);
     applyRig(latestRig);
     vrm.update(dt); // spring bones, etc.

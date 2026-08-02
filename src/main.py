@@ -252,6 +252,7 @@ def main() -> None:
     framing: dict | None = None
     _calib_face_h: float = 0.0
     _standing_filter = OneEuroFilter(0.4, 0.0)  # slow, smooth transitions
+    _body_extent_filter = OneEuroFilter(0.8, 0.0)  # smooth body extent transitions
     _stand_state = 0  # binary hysteresis state: 0=sit, 1=stand
 
     try:
@@ -326,19 +327,34 @@ def main() -> None:
             # Standing detection: hips visible in frame → user stepped back
             # Uses hysteresis to prevent rapid flicker at the threshold edge.
             _hip_vis = 0.0
+            _body_extent = 0.0  # how many torso-lengths of body visible below shoulders
             if last_pose_result and last_pose_result.pose_landmarks:
                 plms = last_pose_result.pose_landmarks[0]
                 _hip_vis = (plms[23].visibility + plms[24].visibility) / 2.0
+                # Body extent: continuous metric of how far down the body is visible.
+                # Uses shoulder→hip distance as a reference unit (torso length).
+                #   0 = just shoulders, 1 = to hips, 2 = to knees, 3+ = to ankles
+                sh_y = (plms[11].y + plms[12].y) / 2
+                hip_y = (plms[23].y + plms[24].y) / 2
+                torso_unit = max(hip_y - sh_y, 0.01)
+                # Find the lowest visible landmark (highest image Y = bottom of frame)
+                lowest_y = sh_y
+                for idx in [27, 28, 25, 26, 23, 24]:
+                    if plms[idx].visibility > 0.3 and plms[idx].y > lowest_y:
+                        lowest_y = plms[idx].y
+                _body_extent = (lowest_y - sh_y) / torso_unit
+            _body_extent = _body_extent_filter.filter(_body_extent, dt)
             if _stand_state:
                 _stand_state = 0 if _hip_vis < 0.30 else 1  # lower threshold to exit stand
             else:
                 _stand_state = 1 if _hip_vis > 0.50 else 0  # higher threshold to enter stand
             standing = _standing_filter.filter(float(_stand_state), dt)
 
-            # Inject standing into pose dict
+            # Inject standing + body coverage into pose dict
             if last_pose is None:
                 last_pose = {}
             last_pose["standing"] = standing
+            last_pose["body_extent"] = _body_extent
 
             server.broadcast(_state_to_ws(state, last_hands, last_pose, framing))
 
