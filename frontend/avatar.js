@@ -49,11 +49,11 @@ function _applyPose(vrmModel, pose) {
   const standing = pose?.standing ?? 0;
   const sit = 1.0 - standing;
 
-  // Base posture — blend seated lean vs upright
+  // Base posture — no forced lean (kept straight)
   const hips = _getBone("hips");
-  if (hips) hips.rotation.set(0.06 * sit, 0, 0);
+  if (hips) hips.rotation.set(0, 0, 0);
   const spine = _getBone("spine");
-  if (spine) spine.rotation.set(0.04 * sit, 0, 0);
+  if (spine) spine.rotation.set(0, 0, 0);
 
   if (pose && pose.leftUpperArm) {
     // Tracked pose — apply arm quaternions
@@ -73,7 +73,7 @@ function _applyPose(vrmModel, pose) {
     if (upperChest) upperChest.rotation.set(lean * 0.5, twist * 0.5, lateral * 0.5);
     const chest = _getBone("chest");
     if (chest) chest.rotation.set(lean * 0.3, twist * 0.3, lateral * 0.3);
-    if (spine) spine.rotation.set(0.04 * sit + lean * 0.2, twist * 0.2, lateral * 0.2);
+    if (spine) spine.rotation.set(lean * 0.2, twist * 0.2, lateral * 0.2);
   } else {
     // Fallback rest pose — relaxed A-pose
     for (const [name, rot] of Object.entries(_REST_POSE)) {
@@ -161,7 +161,7 @@ function applyFraming(framing) {
   let targetY = modelFaceCenter + (2 * userFaceCenter - 1) * dist * tanHalfFov;
 
   // Iterative correction for camera tilt
-  const tiltOffset = 0.10;
+  const tiltOffset = 0.0;
   for (let i = 0; i < 5; i++) {
     camera.position.set(0, targetY + tiltOffset, -dist);
     camera.lookAt(0, targetY, 0);
@@ -193,7 +193,7 @@ function applyFraming(framing) {
     dist: standDist,
     targetY: sceneCenter.y,
     fov: standFov,
-    tilt: 0.05,
+    tilt: 0.0,
   };
 
   const screenFaceCenter = _projectToScreenY(modelFaceCenter);
@@ -250,7 +250,7 @@ function applyDynamicCamera(standing, bodyExtent) {
   const fov = 30;
   const halfFov = (fov * Math.PI) / 360;
   const dist = Math.max((bodyH * 1.1) / (2 * Math.tan(halfFov)), 0.8);
-  const tilt = 0.05;
+  const tilt = 0.0;
 
   // Blend with sit cam based on standing amount + body coverage
   const frac = Math.min(standing + Math.max(0, be - 0.5) * 0.3, 1.0);
@@ -311,8 +311,10 @@ function applyRig(rig) {
     const head = vrm.humanoid?.getNormalizedBoneNode("head");
     if (head) {
       const [yaw, pitch, roll] = rig.head;
+      const sit = 1.0 - (rig.pose?.standing ?? 0);
+      const pitchOffset = 0.32 * sit;
       head.rotation.order = "YXZ";
-      head.rotation.set(pitch + 0.32, yaw, roll);
+      head.rotation.set(pitch + pitchOffset, yaw, roll);
     }
   }
 
