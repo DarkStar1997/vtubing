@@ -110,6 +110,12 @@ _twist_sin_f: dict[str, OneEuroFilter] = {"left": OneEuroFilter(1.5, 0.01), "rig
 _twist_cos_f: dict[str, OneEuroFilter] = {"left": OneEuroFilter(1.5, 0.01), "right": OneEuroFilter(1.5, 0.01)}
 _twist_prev: dict[str, float] = {"left": 0.0, "right": 0.0}
 
+# Finger curl filters: 5 fingers × 3 joints per hand
+_FINGER_NAMES = ["thumb", "index", "middle", "ring", "little"]
+_curl_filters: dict[str, list[OneEuroFilter]] = {
+    side: [OneEuroFilter(1.5, 0.0) for _ in range(15)] for side in ("left", "right")
+}
+
 
 def _process_hand_twist(hands: dict | None, dt: float) -> None:
     """Filter palm twist in-place: circular neutral subtraction + sin/cos smoothing."""
@@ -124,7 +130,7 @@ def _process_hand_twist(hands: dict | None, dt: float) -> None:
         neutral = _hand_twist_neutral.get(side, 0.0)
         if not math.isfinite(raw):
             raw = _twist_prev[side]
-        # Circular difference (handles ±π wraparound)
+        # Circular Difference (handles ±π wraparound)
         delta = math.atan2(math.sin(raw - neutral), math.cos(raw - neutral))
         # Filter sin/cos separately for smooth circular smoothing
         s = _twist_sin_f[side].filter(math.sin(delta), dt)
@@ -132,6 +138,27 @@ def _process_hand_twist(hands: dict | None, dt: float) -> None:
         smooth = math.atan2(s, c)
         _twist_prev[side] = smooth
         h["twist"] = smooth
+
+
+def _filter_hand_curls(hands: dict | None, dt: float) -> None:
+    """One-euro filter finger curl values in-place for smooth finger motion."""
+    if not hands:
+        return
+    for side in ("left", "right"):
+        h = hands.get(side)
+        if h is None or "fingers" not in h:
+            continue
+        filters = _curl_filters[side]
+        i = 0
+        for fname in _FINGER_NAMES:
+            joints = h["fingers"].get(fname)
+            if not joints:
+                i += 3
+                continue
+            for j in range(len(joints)):
+                if i < len(filters) and math.isfinite(joints[j]):
+                    joints[j] = filters[i].filter(float(joints[j]), dt)
+                i += 1
 
 
 def _state_to_ws(state: dict, hands: dict | None = None, pose: dict | None = None,

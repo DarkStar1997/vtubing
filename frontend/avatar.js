@@ -41,6 +41,14 @@ const _REST_POSE = {
   rightLowerArm: { x: 0,    y: 0,     z: 1.15 },
 };
 
+// Arms hanging straight at sides (standing rest)
+const _STAND_ARM_POSE = {
+  leftUpperArm:  { x: 0, y: 0.05, z: 1.45 },
+  rightUpperArm: { x: 0, y: -0.05, z: -1.45 },
+  leftLowerArm:  { x: 0, y: 0, z: 0 },
+  rightLowerArm: { x: 0, y: 0, z: 0 },
+};
+
 function _applyPose(vrmModel, pose) {
   const h = vrmModel.humanoid;
   if (!h) return;
@@ -56,7 +64,7 @@ function _applyPose(vrmModel, pose) {
   if (spine) spine.rotation.set(0, 0, 0);
 
   if (pose && pose.leftUpperArm) {
-    // Tracked pose — apply arm quaternions
+    // Tracked pose — apply arm quaternions directly (full tracking)
     for (const name of ["leftUpperArm", "rightUpperArm", "leftLowerArm", "rightLowerArm"]) {
       const bone = _getBone(name);
       if (bone && pose[name]) {
@@ -65,8 +73,9 @@ function _applyPose(vrmModel, pose) {
       }
     }
     // Spine: forward lean + twist + lateral bend
+    // Add small forward correction when standing to counteract model's backward tilt
     const sp = pose.spine;
-    const lean = sp ? sp[0] : (pose.torso ?? 0);
+    const lean = (sp ? sp[0] : (pose.torso ?? 0)) - 0.15 * standing;
     const twist = sp ? sp[1] : 0;
     const lateral = sp ? sp[2] : 0;
     const upperChest = _getBone("upperChest");
@@ -75,8 +84,9 @@ function _applyPose(vrmModel, pose) {
     if (chest) chest.rotation.set(lean * 0.3, twist * 0.3, lateral * 0.3);
     if (spine) spine.rotation.set(lean * 0.2, twist * 0.2, lateral * 0.2);
   } else {
-    // Fallback rest pose — relaxed A-pose
-    for (const [name, rot] of Object.entries(_REST_POSE)) {
+    // Fallback rest pose — stand pose when standing, A-pose when sitting
+    const rest = standing > 0.5 ? _STAND_ARM_POSE : _REST_POSE;
+    for (const [name, rot] of Object.entries(rest)) {
       const bone = _getBone(name);
       if (bone) bone.rotation.set(rot.x, rot.y, rot.z);
     }
@@ -312,7 +322,7 @@ function applyRig(rig) {
     if (head) {
       const [yaw, pitch, roll] = rig.head;
       const sit = 1.0 - (rig.pose?.standing ?? 0);
-      const pitchOffset = 0.32 * sit;
+      const pitchOffset = 0.12 * sit;
       head.rotation.order = "YXZ";
       head.rotation.set(pitch + pitchOffset, yaw, roll);
     }
@@ -324,8 +334,8 @@ function applyRig(rig) {
     vrm.lookAt.applier.applyYawPitch(yaw, pitch);
   }
 
-  // Hand finger curls
-  _applyHands(rig.hands);
+  // Hand finger curls (pass standing for palm offset blend)
+  _applyHands(rig.hands, rig.pose?.standing ?? 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -348,9 +358,6 @@ const _HAND_BONES = {
     little: ["rightLittleProximal", "rightLittleIntermediate", "rightLittleDistal"],
   },
 };
-// Max flexion angle per joint position [proximal, intermediate, distal] (radians)
-const _JOINT_MAX_RAD = [3.0, 3.2, 2.2];
-const _THUMB_JOINT_MAX_RAD = [1.5, 2.0, 2.0];
 const _BONE_CACHE = {};
 
 function _getBone(name) {
@@ -361,7 +368,8 @@ function _getBone(name) {
   return _BONE_CACHE[name];
 }
 
-function _applyHands(hands) {
+function _applyHands(hands, standing = 0) {
+  const sit = 1.0 - standing;
   for (const side of ["left", "right"]) {
     const hand = hands?.[side];
     const sign = side === "left" ? -1 : 1;
@@ -370,6 +378,7 @@ function _applyHands(hands) {
     // VRM hand bones are NOT mirrored: same X rotation → same palm direction.
     // Cross product gives opposite-sign twist for L/R hands, so `OFFSET - twist`
     // produces correct mirrored palm motion on both hands.
+    // Blend offset with standing: 1.8 sitting (palms face camera) → 0 standing (palms face body).
     const handBone = _getBone(side === "left" ? "leftHand" : "rightHand");
     if (handBone) {
       const twistKey = side + "_twist";
@@ -379,23 +388,29 @@ function _applyHands(hands) {
       } else {
         (window._lastTwist ??= {})[twistKey] = twist;
       }
-      const OFFSET = 1.8;
+      const OFFSET = 1.8 * sit;
       const final = Math.max(-2.5, Math.min(2.5, OFFSET - twist));
       handBone.rotation.set(final, 0, 0);
     }
 
-    // Per-joint finger angles
+    // Per-joint finger angles (raw radians from MediaPipe landmarks)
+    // Only map fingers when sitting — too noisy when standing/far from camera
+    const applyFingers = sit > 0.7;
     for (const fingerName of _FINGER_NAMES) {
       const bones = _HAND_BONES[side][fingerName];
       const angles = hand?.fingers?.[fingerName] ?? [];
-      const maxAngles = fingerName === "thumb" ? _THUMB_JOINT_MAX_RAD : _JOINT_MAX_RAD;
       for (let j = 0; j < bones.length; j++) {
         const bone = _getBone(bones[j]);
         if (!bone) continue;
-        const flex = angles[j] ?? 0;
-        const angle = sign * flex * (maxAngles[j] ?? 1.1);
+        const flex = applyFingers ? (angles[j] ?? 0) : 0;
+        const angle = sign * flex;
         if (fingerName === "thumb") {
-          bone.rotation.set(0, angle, 0);
+          // Subtract rest baseline so open thumb = straight, only curl past threshold
+          const baseline = [0.35, 0.25, 0.15][j] ?? 0.2;
+          const curl = Math.max(0, flex - baseline) * 2.5;
+          // When standing (palms not twisted), add tuck to keep thumb in-line
+          const tuck = standing * 0.3;
+          bone.rotation.set(0, -sign * (curl + tuck), 0);
         } else {
           bone.rotation.set(0, 0, -angle);
         }

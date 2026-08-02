@@ -68,10 +68,10 @@ class HandLandmarker:
 
 
 def _joint_angle(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
-    """Flexion angle at joint *b* given consecutive points a→b→c. Returns [0, 1].
+    """Flexion angle at joint *b* given consecutive points a→b→c. Returns radians.
 
     Straight finger: segments a→b and b→c point the same way → 0.
-    Curled finger: segments bend up to ~π → 1.
+    Curled finger: segments bend up to ~π.
     """
     v1 = b - a
     v2 = c - b
@@ -79,8 +79,7 @@ def _joint_angle(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
     if n1 < 1e-8 or n2 < 1e-8:
         return 0.0
     cos_a = np.clip(np.dot(v1, v2) / (n1 * n2), -1.0, 1.0)
-    angle = np.arccos(cos_a)
-    return float(np.clip(angle / np.pi, 0.0, 1.0))
+    return float(np.arccos(cos_a))
 
 
 def _compute_finger_angles(pts: np.ndarray) -> dict[str, list[float]]:
