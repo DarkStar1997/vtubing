@@ -15,7 +15,7 @@ struct Framebuffer {
 };
 
 struct Timer {
-    std::chrono::high_resolution_clock::time_point start;
+    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
     void reset() { start = std::chrono::high_resolution_clock::now(); }
     double elapsedMs() const {
         auto end = std::chrono::high_resolution_clock::now();

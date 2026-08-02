@@ -178,6 +178,88 @@ static inline void sampleTextureNearest(
     out[0] = px[0]; out[1] = px[1]; out[2] = px[2]; out[3] = px[3];
 }
 
+// Rasterize a single triangle. xMin/xMax/yMin/yMax are inclusive clip bounds.
+static inline void rasterizeTri(
+    const ProcessedPrim& pp,
+    const MeshPrimitive& prim,
+    int triIdx,
+    Framebuffer& fb,
+    const std::vector<TextureData>& textures,
+    int xMin, int xMax, int yMin, int yMax)
+{
+    const uint32_t* indices = prim.indices.data();
+    uint32_t i0 = indices[triIdx * 3 + 0];
+    uint32_t i1 = indices[triIdx * 3 + 1];
+    uint32_t i2 = indices[triIdx * 3 + 2];
+
+    float x0 = pp.screenX[i0], y0 = pp.screenY[i0], z0 = pp.clipZ[i0];
+    float x1 = pp.screenX[i1], y1 = pp.screenY[i1], z1 = pp.clipZ[i1];
+    float x2 = pp.screenX[i2], y2 = pp.screenY[i2], z2 = pp.clipZ[i2];
+    float u0 = pp.uvU[i0], v0uv = pp.uvV[i0];
+    float u1 = pp.uvU[i1], v1uv = pp.uvV[i1];
+    float u2 = pp.uvU[i2], v2uv = pp.uvV[i2];
+
+    // Backface culling (CCW front-facing)
+    float area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+    if (area < 0) {
+        if (!prim.doubleSided) return;
+        std::swap(x1, x2); std::swap(y1, y2); std::swap(z1, z2);
+        std::swap(u1, u2); std::swap(v1uv, v2uv);
+        area = -area;
+    }
+    if (area < 0.01f) return;
+
+    // Bounding box: convert to int first, then clip to [xMin,xMax]×[yMin,yMax]
+    int ix0 = std::max(xMin, static_cast<int>(std::min({x0, x1, x2})));
+    int ix1 = std::min(xMax, static_cast<int>(std::max({x0, x1, x2})));
+    int iy0 = std::max(yMin, static_cast<int>(std::min({y0, y1, y2})));
+    int iy1 = std::min(yMax, static_cast<int>(std::max({y0, y1, y2})));
+    if (iy1 < iy0 || ix1 < ix0) return;
+
+    float invArea = 1.0f / area;
+    bool hasTex = prim.textureIndex >= 0 && prim.textureIndex < (int)textures.size();
+    const TextureData* tex = hasTex ? &textures[prim.textureIndex] : nullptr;
+
+    for (int py = iy0; py <= iy1; py++) {
+        for (int px = ix0; px <= ix1; px++) {
+            float fx = px + 0.5f;
+            float fy = py + 0.5f;
+
+            float e0 = (x2 - x1) * (fy - y1) - (y2 - y1) * (fx - x1);
+            float e1 = (x0 - x2) * (fy - y2) - (y0 - y2) * (fx - x2);
+            float e2 = (x1 - x0) * (fy - y0) - (y1 - y0) * (fx - x0);
+
+            if (e0 < 0 || e1 < 0 || e2 < 0) continue;
+
+            float b0 = e0 * invArea;
+            float b1 = e1 * invArea;
+            float b2 = e2 * invArea;
+            float z = b0 * z0 + b1 * z1 + b2 * z2;
+
+            int pixIdx = py * fb.width + px;
+            if (z < fb.depth[pixIdx]) {
+                fb.depth[pixIdx] = z;
+
+                uint8_t color[4];
+                if (tex) {
+                    float u = b0 * u0 + b1 * u1 + b2 * u2;
+                    float v = b0 * v0uv + b1 * v1uv + b2 * v2uv;
+                    sampleTextureNearest(*tex, u, v, color);
+                } else {
+                    color[0] = (uint8_t)(prim.baseColor.r * 255);
+                    color[1] = (uint8_t)(prim.baseColor.g * 255);
+                    color[2] = (uint8_t)(prim.baseColor.b * 255);
+                    color[3] = 255;
+                }
+                fb.color[pixIdx * 4 + 0] = color[0];
+                fb.color[pixIdx * 4 + 1] = color[1];
+                fb.color[pixIdx * 4 + 2] = color[2];
+                fb.color[pixIdx * 4 + 3] = color[3];
+            }
+        }
+    }
+}
+
 void rasterizePrim(
     const ProcessedPrim& pp,
     Framebuffer& fb,
@@ -185,94 +267,9 @@ void rasterizePrim(
     int yMin, int yMax)
 {
     const MeshPrimitive& prim = *pp.prim;
-    const uint32_t* indices = prim.indices.data();
     int numTris = prim.triangleCount();
-    bool hasTex = prim.textureIndex >= 0 && prim.textureIndex < (int)textures.size();
-    const TextureData* tex = hasTex ? &textures[prim.textureIndex] : nullptr;
-
-    for (int t = 0; t < numTris; t++) {
-        uint32_t i0 = indices[t * 3 + 0];
-        uint32_t i1 = indices[t * 3 + 1];
-        uint32_t i2 = indices[t * 3 + 2];
-
-        float x0 = pp.screenX[i0], y0 = pp.screenY[i0], z0 = pp.clipZ[i0];
-        float x1 = pp.screenX[i1], y1 = pp.screenY[i1], z1 = pp.clipZ[i1];
-        float x2 = pp.screenX[i2], y2 = pp.screenY[i2], z2 = pp.clipZ[i2];
-        float u0 = pp.uvU[i0], v0uv = pp.uvV[i0];
-        float u1 = pp.uvU[i1], v1uv = pp.uvV[i1];
-        float u2 = pp.uvU[i2], v2uv = pp.uvV[i2];
-
-        // Backface culling (CCW front-facing)
-        float area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
-        if (area < 0) {
-            if (!prim.doubleSided) continue; // backface culled
-            std::swap(x1, x2); std::swap(y1, y2); std::swap(z1, z2);
-            std::swap(u1, u2); std::swap(v1uv, v2uv);
-            area = -area;
-        }
-        if (area < 0.01f) continue;
-
-        // Bounding box (clipped to screen)
-        float minX = std::max(0.0f, std::min({x0, x1, x2}));
-        float maxX = std::min((float)fb.width - 1, std::max({x0, x1, x2}));
-        float minY = std::max(0.0f, std::min({y0, y1, y2}));
-        float maxY = std::min((float)fb.height - 1, std::max({y0, y1, y2}));
-
-        if (maxX < minX || maxY < minY) continue;
-
-        int ix0 = static_cast<int>(minX);
-        int ix1 = static_cast<int>(maxX);
-        int iy0 = std::max(static_cast<int>(minY), yMin);
-        int iy1 = std::min(static_cast<int>(maxY), yMax - 1);
-        if (iy1 < iy0) continue;
-
-        float invArea = 1.0f / area;
-
-        for (int py = iy0; py <= iy1; py++) {
-            for (int px = ix0; px <= ix1; px++) {
-                float fx = px + 0.5f;
-                float fy = py + 0.5f;
-
-                // Barycentric weights via edge functions
-                // E(A,B,P) = (Bx-Ax)*(Py-Ay) - (By-Ay)*(Px-Ax)
-                float e0 = (x2 - x1) * (fy - y1) - (y2 - y1) * (fx - x1);
-                float e1 = (x0 - x2) * (fy - y2) - (y0 - y2) * (fx - x2);
-                float e2 = (x1 - x0) * (fy - y0) - (y1 - y0) * (fx - x0);
-
-                if (e0 < 0 || e1 < 0 || e2 < 0) continue;
-
-                float b0 = e0 * invArea;
-                float b1 = e1 * invArea;
-                float b2 = e2 * invArea;
-
-                // Interpolate Z
-                float z = b0 * z0 + b1 * z1 + b2 * z2;
-
-                int pixIdx = py * fb.width + px;
-                if (z < fb.depth[pixIdx]) {
-                    fb.depth[pixIdx] = z;
-
-                    uint8_t color[4];
-                    if (tex) {
-                        float u = b0 * u0 + b1 * u1 + b2 * u2;
-                        float v = b0 * v0uv + b1 * v1uv + b2 * v2uv;
-                        // VRM textures typically use V-flipped UVs, but stb_image loads top-to-bottom
-                        // For now, use V as-is
-                        sampleTextureNearest(*tex, u, v, color);
-                    } else {
-                        color[0] = (uint8_t)(prim.baseColor.r * 255);
-                        color[1] = (uint8_t)(prim.baseColor.g * 255);
-                        color[2] = (uint8_t)(prim.baseColor.b * 255);
-                        color[3] = 255;
-                    }
-                    fb.color[pixIdx * 4 + 0] = color[0];
-                    fb.color[pixIdx * 4 + 1] = color[1];
-                    fb.color[pixIdx * 4 + 2] = color[2];
-                    fb.color[pixIdx * 4 + 3] = color[3];
-                }
-            }
-        }
-    }
+    for (int t = 0; t < numTris; t++)
+        rasterizeTri(pp, prim, t, fb, textures, 0, fb.width - 1, yMin, yMax - 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -423,20 +420,65 @@ void rasterizeParallel(
         return;
     }
 
-    // Static horizontal bands — simple and cache-friendly
-    int bandHeight = (fb.height + numThreads - 1) / numThreads;
+    // --- Tile-based parallel rasterization ---
+    // 1. Bin all triangles into tiles (each tri assigned to tiles it overlaps)
+    // 2. Threads pull tiles from atomic queue — only rasterize binned tris
+    const int TILE = 64;
+    int tilesX = (fb.width + TILE - 1) / TILE;
+    int tilesY = (fb.height + TILE - 1) / TILE;
+    int numTiles = tilesX * tilesY;
 
-    auto rasterizeBand = [&](int yStart, int yEnd) {
-        for (int i = 0; i < numPrims; i++)
-            rasterizePrim(*allPrims[i], fb, textures, yStart, yEnd);
+    struct TriRef { const ProcessedPrim* pp; int triIdx; };
+    std::vector<std::vector<TriRef>> tileBins(numTiles);
+
+    // Binning pass: assign each triangle to overlapping tiles
+    for (int pi = 0; pi < numPrims; pi++) {
+        const auto& pp = *allPrims[pi];
+        const auto& prim = *pp.prim;
+        const auto& indices = prim.indices;
+        int numTris = (int)indices.size() / 3;
+        for (int t = 0; t < numTris; t++) {
+            uint32_t i0 = indices[t * 3], i1 = indices[t * 3 + 1], i2 = indices[t * 3 + 2];
+            float minY = std::min({pp.screenY[i0], pp.screenY[i1], pp.screenY[i2]});
+            float maxY = std::max({pp.screenY[i0], pp.screenY[i1], pp.screenY[i2]});
+            float minX = std::min({pp.screenX[i0], pp.screenX[i1], pp.screenX[i2]});
+            float maxX = std::max({pp.screenX[i0], pp.screenX[i1], pp.screenX[i2]});
+            if (maxX < 0 || minX >= fb.width || maxY < 0 || minY >= fb.height) continue;
+            int tx0 = std::max(0, (int)minX / TILE);
+            int tx1 = std::min(tilesX - 1, (int)maxX / TILE);
+            int ty0 = std::max(0, (int)minY / TILE);
+            int ty1 = std::min(tilesY - 1, (int)maxY / TILE);
+            for (int ty = ty0; ty <= ty1; ty++) {
+                for (int tx = tx0; tx <= tx1; tx++) {
+                    tileBins[ty * tilesX + tx].push_back({allPrims[pi], t});
+                }
+            }
+        }
+    }
+
+    // Rasterize pass: atomic work queue over tiles
+    std::atomic<int> next{0};
+
+    auto worker = [&]() {
+        while (true) {
+            int tileIdx = next.fetch_add(1, std::memory_order_relaxed);
+            if (tileIdx >= numTiles) break;
+            int tx = tileIdx % tilesX;
+            int ty = tileIdx / tilesX;
+            int xStart = tx * TILE;
+            int yStart = ty * TILE;
+            int xEnd = std::min(xStart + TILE, fb.width);
+            int yEnd = std::min(yStart + TILE, fb.height);
+
+            auto& bin = tileBins[tileIdx];
+            for (auto& tr : bin)
+                rasterizeTri(*tr.pp, *tr.pp->prim, tr.triIdx, fb, textures,
+                             xStart, xEnd - 1, yStart, yEnd - 1);
+        }
     };
 
     auto& pool = getThreadPool();
-    for (int t = 0; t < numThreads; t++) {
-        int yStart = t * bandHeight;
-        int yEnd = std::min(yStart + bandHeight, fb.height);
-        if (yStart >= yEnd) break;
-        pool.detach_task([&, yStart, yEnd]() { rasterizeBand(yStart, yEnd); });
-    }
+    for (int t = 0; t < numThreads; t++)
+        pool.detach_task(worker);
     pool.wait();
 }

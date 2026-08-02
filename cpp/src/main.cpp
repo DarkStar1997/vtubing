@@ -13,7 +13,15 @@
 
 int main(int argc, char** argv) {
     std::string vrmPath = "../../assets/avatars/male_52blendshapes.vrm";
-    if (argc > 1) vrmPath = argv[1];
+
+    // Parse args: [--bench N] [vrm_path]
+    int benchFrames = 0;
+    int argIdx = 1;
+    if (argc >= 3 && std::string(argv[1]) == "--bench") {
+        benchFrames = std::atoi(argv[2]);
+        argIdx = 3;
+    }
+    if (argc > argIdx) vrmPath = argv[argIdx];
 
     int fbWidth = 1280;
     int fbHeight = 720;
@@ -70,6 +78,47 @@ int main(int argc, char** argv) {
     // --- Render one frame and time it ---
     int numThreads = std::min((int)std::thread::hardware_concurrency(), 16);
     fprintf(stderr, "[main] threads: %d\n", numThreads);
+
+    if (benchFrames > 0) {
+        fprintf(stderr, "\n=== BENCHMARK: %d frames ===\n", benchFrames);
+        Timer btimer, timer;
+        double totalVert = 0, totalRast = 0;
+        for (int f = 0; f < benchFrames; f++) {
+            timer.reset();
+            auto proc = processVerticesParallel(model, jointMatrices, viewProj, morphWeights, fbWidth, fbHeight, numThreads);
+            double vms = timer.elapsedMs();
+            timer.reset();
+            fb.clear();
+            rasterizeParallel(proc, fb, model.textures, numThreads);
+            double rms = timer.elapsedMs();
+            totalVert += vms;
+            totalRast += rms;
+        }
+        double wallMs = btimer.elapsedMs();
+        fprintf(stderr, "Avg vertex: %.3f ms | Avg raster: %.3f ms\n",
+                totalVert / benchFrames, totalRast / benchFrames);
+        fprintf(stderr, "Avg total:  %.3f ms (%.1f fps)\n",
+                wallMs / benchFrames, benchFrames * 1000.0 / wallMs);
+
+        // Verify last frame: foreground pixel count
+        int fgCount = 0;
+        for (int i = 0; i < fbWidth * fbHeight; i++)
+            if (fb.depth[i] < 1.0f) fgCount++;
+        fprintf(stderr, "Foreground pixels: %d / %d (%.1f%%)\n",
+                fgCount, fbWidth * fbHeight, 100.0f * fgCount / (fbWidth * fbHeight));
+
+        // Save last frame for visual comparison
+        std::vector<uint8_t> rgb(fbWidth * fbHeight * 3);
+        for (int i = 0; i < fbWidth * fbHeight; i++) {
+            rgb[i * 3 + 0] = fb.color[i * 4 + 0];
+            rgb[i * 3 + 1] = fb.color[i * 4 + 1];
+            rgb[i * 3 + 2] = fb.color[i * 4 + 2];
+        }
+        stbi_write_png("output_bench.png", fbWidth, fbHeight, 3, rgb.data(), fbWidth * 3);
+        fprintf(stderr, "Saved: output_bench.png\n");
+        fprintf(stderr, "Wall time:  %.1f ms\n", wallMs);
+        return 0;
+    }
 
     Timer timer;
 
