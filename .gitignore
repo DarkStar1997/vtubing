@@ -26,3 +26,7 @@ assets/models/*.task
 /output/
 *.mp4
 *.avi
+output_cpp.png
+
+# C++ build artifacts
+cpp/build/
