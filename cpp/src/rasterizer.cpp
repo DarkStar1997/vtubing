@@ -282,86 +282,105 @@ std::vector<ProcessedMesh> processVerticesParallel(
     std::vector<ProcessedMesh> result(model.meshes.size());
     int numMeshes = static_cast<int>(model.meshes.size());
 
-    auto processRange = [&](int meshStart, int meshEnd) {
-        for (int mi = meshStart; mi < meshEnd; mi++) {
-            const auto& mesh = model.meshes[mi];
-            result[mi].prims.resize(mesh.primitives.size());
+    // --- Phase 1: Pre-allocate all output arrays + build flat work list ---
+    struct WorkItem {
+        int meshIdx, primIdx, vertStart, vertEnd, weightBase;
+    };
+    std::vector<WorkItem> workItems;
 
-            for (size_t pi = 0; pi < mesh.primitives.size(); pi++) {
-                const auto& prim = mesh.primitives[pi];
-                int vc = prim.vertexCount();
-                auto& pp = result[mi].prims[pi];
-                pp.prim = &prim;
-                pp.screenX.resize(vc);
-                pp.screenY.resize(vc);
-                pp.clipZ.resize(vc);
-                pp.uvU.resize(vc);
-                pp.uvV.resize(vc);
+    for (int mi = 0; mi < numMeshes; mi++) {
+        const auto& mesh = model.meshes[mi];
+        result[mi].prims.resize(mesh.primitives.size());
 
-                int weightBase = 0;
-                for (int mj = 0; mj < mi; mj++) {
-                    if (!model.meshes[mj].primitives.empty())
-                        weightBase += model.meshes[mj].primitives[0].morphCount;
+        int weightBase = 0;
+        for (int mj = 0; mj < mi; mj++) {
+            if (!model.meshes[mj].primitives.empty())
+                weightBase += model.meshes[mj].primitives[0].morphCount;
+        }
+
+        for (size_t pi = 0; pi < mesh.primitives.size(); pi++) {
+            const auto& prim = mesh.primitives[pi];
+            int vc = prim.vertexCount();
+            auto& pp = result[mi].prims[pi];
+            pp.prim = &prim;
+            pp.screenX.resize(vc);
+            pp.screenY.resize(vc);
+            pp.clipZ.resize(vc);
+            pp.uvU.resize(vc);
+            pp.uvV.resize(vc);
+
+            // Split large prims into ~1024-vertex chunks for better load balancing
+            const int CHUNK = 1024;
+            for (int v = 0; v < vc; v += CHUNK) {
+                workItems.push_back({mi, (int)pi, v, std::min(v + CHUNK, vc), weightBase});
+            }
+        }
+    }
+
+    // --- Phase 2: Process work items in parallel ---
+    auto processVertex = [&](
+        const MeshPrimitive& prim, ProcessedPrim& pp,
+        int v, int weightBase)
+    {
+        int vc = prim.vertexCount();
+        glm::vec3 pos(prim.positions[v * 3], prim.positions[v * 3 + 1], prim.positions[v * 3 + 2]);
+        if (prim.morphCount > 0) {
+            for (int t = 0; t < prim.morphCount; t++) {
+                float w = morphWeights[weightBase + t];
+                if (w > 0.0f) {
+                    pos.x += prim.morphDeltas[(t * vc + v) * 3 + 0] * w;
+                    pos.y += prim.morphDeltas[(t * vc + v) * 3 + 1] * w;
+                    pos.z += prim.morphDeltas[(t * vc + v) * 3 + 2] * w;
                 }
+            }
+        }
 
-                for (int v = 0; v < vc; v++) {
-                    glm::vec3 pos(prim.positions[v * 3], prim.positions[v * 3 + 1], prim.positions[v * 3 + 2]);
-                    if (prim.morphCount > 0) {
-                        for (int t = 0; t < prim.morphCount; t++) {
-                            float w = morphWeights[weightBase + t];
-                            if (w > 0.0f) {
-                                pos.x += prim.morphDeltas[(t * vc + v) * 3 + 0] * w;
-                                pos.y += prim.morphDeltas[(t * vc + v) * 3 + 1] * w;
-                                pos.z += prim.morphDeltas[(t * vc + v) * 3 + 2] * w;
-                            }
-                        }
-                    }
+        glm::vec4 skinned(0);
+        if (!prim.weights.empty() && !jointMatrices.empty()) {
+            glm::vec4 hp(pos, 1.0f);
+            skinned  = (jointMatrices[prim.joints[v * 4 + 0]] * hp) * prim.weights[v * 4 + 0];
+            skinned += (jointMatrices[prim.joints[v * 4 + 1]] * hp) * prim.weights[v * 4 + 1];
+            skinned += (jointMatrices[prim.joints[v * 4 + 2]] * hp) * prim.weights[v * 4 + 2];
+            skinned += (jointMatrices[prim.joints[v * 4 + 3]] * hp) * prim.weights[v * 4 + 3];
+        } else {
+            skinned = glm::vec4(pos, 1.0f);
+        }
 
-                    glm::vec4 skinned(0);
-                    if (!prim.weights.empty() && !jointMatrices.empty()) {
-                        uint16_t j0 = prim.joints[v * 4 + 0];
-                        uint16_t j1 = prim.joints[v * 4 + 1];
-                        uint16_t j2 = prim.joints[v * 4 + 2];
-                        uint16_t j3 = prim.joints[v * 4 + 3];
-                        float w0 = prim.weights[v * 4 + 0];
-                        float w1 = prim.weights[v * 4 + 1];
-                        float w2 = prim.weights[v * 4 + 2];
-                        float w3 = prim.weights[v * 4 + 3];
-                        glm::vec4 hp(pos, 1.0f);
-                        skinned = (jointMatrices[j0] * hp) * w0;
-                        skinned += (jointMatrices[j1] * hp) * w1;
-                        skinned += (jointMatrices[j2] * hp) * w2;
-                        skinned += (jointMatrices[j3] * hp) * w3;
-                    } else {
-                        skinned = glm::vec4(pos, 1.0f);
-                    }
+        glm::vec4 clip = viewProj * skinned;
+        float w = clip.w;
+        if (w <= 0.0f) w = 1e-10f;
+        float invW = 1.0f / w;
 
-                    glm::vec4 clip = viewProj * skinned;
-                    float w = clip.w;
-                    if (w <= 0.0f) w = 1e-10f;
-                    float invW = 1.0f / w;
+        pp.screenX[v] = (clip.x * invW * 0.5f + 0.5f) * fbWidth;
+        pp.screenY[v] = (1.0f - (clip.y * invW * 0.5f + 0.5f)) * fbHeight;
+        pp.clipZ[v] = clip.z * invW;
+        pp.uvU[v] = prim.uvs.empty() ? 0 : prim.uvs[v * 2];
+        pp.uvV[v] = prim.uvs.empty() ? 0 : prim.uvs[v * 2 + 1];
+    };
 
-                    pp.screenX[v] = (clip.x * invW * 0.5f + 0.5f) * fbWidth;
-                    pp.screenY[v] = (1.0f - (clip.y * invW * 0.5f + 0.5f)) * fbHeight;
-                    pp.clipZ[v] = clip.z * invW;
-                    pp.uvU[v] = prim.uvs.empty() ? 0 : prim.uvs[v * 2];
-                    pp.uvV[v] = prim.uvs.empty() ? 0 : prim.uvs[v * 2 + 1];
-                }
+    auto processWorkRange = [&](int itemStart, int itemEnd) {
+        for (int i = itemStart; i < itemEnd; i++) {
+            auto& wi = workItems[i];
+            const auto& prim = model.meshes[wi.meshIdx].primitives[wi.primIdx];
+            auto& pp = result[wi.meshIdx].prims[wi.primIdx];
+            for (int v = wi.vertStart; v < wi.vertEnd; v++) {
+                processVertex(prim, pp, v, wi.weightBase);
             }
         }
     };
 
-    if (numThreads <= 1 || numMeshes <= 1) {
-        processRange(0, numMeshes);
+    int numItems = static_cast<int>(workItems.size());
+    if (numThreads <= 1 || numItems <= 1) {
+        processWorkRange(0, numItems);
     } else {
-        int nt = std::min(numThreads, numMeshes);
+        int nt = std::min(numThreads, numItems);
         std::vector<std::thread> threads;
-        int perThread = (numMeshes + nt - 1) / nt;
+        int perThread = (numItems + nt - 1) / nt;
         for (int t = 0; t < nt; t++) {
             int start = t * perThread;
-            int end = std::min(start + perThread, numMeshes);
+            int end = std::min(start + perThread, numItems);
             if (start >= end) break;
-            threads.emplace_back(processRange, start, end);
+            threads.emplace_back(processWorkRange, start, end);
         }
         for (auto& th : threads) th.join();
     }
