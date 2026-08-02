@@ -55,15 +55,9 @@ std::vector<ProcessedMesh> processVertices(
     const std::vector<float>& morphWeights,  // [meshIdx][targetIdx] flattened
     int fbWidth, int fbHeight);
 
-// Rasterize a processed primitive into the framebuffer (scalar)
-void rasterizePrim(
-    const ProcessedPrim& pp,
-    Framebuffer& fb,
-    const std::vector<TextureData>& textures);
-
-// Rasterize using AVX2 SIMD (8 pixels/iteration)
+// Rasterize a processed primitive into the framebuffer
 // yMin/yMax clip the scanline range (for parallel band rasterization)
-void rasterizePrimSIMD(
+void rasterizePrim(
     const ProcessedPrim& pp,
     Framebuffer& fb,
     const std::vector<TextureData>& textures,

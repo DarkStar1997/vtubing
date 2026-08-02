@@ -85,7 +85,7 @@ int main(int argc, char** argv) {
     double rasterMs = timer.elapsedMs();
     double totalMs = vertexMs + rasterMs;
 
-    fprintf(stderr, "\n=== AVX2 SIMD + MULTITHREADED (%d threads) ===\n", numThreads);
+    fprintf(stderr, "\n=== SCALAR + MULTITHREADED (%d threads) ===\n", numThreads);
     fprintf(stderr, "Vertex processing: %.2f ms\n", vertexMs);
     fprintf(stderr, "Rasterization:     %.2f ms\n", rasterMs);
     fprintf(stderr, "Total:             %.2f ms (%.1f fps)\n", totalMs, 1000.0 / totalMs);
