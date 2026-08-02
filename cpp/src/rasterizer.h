@@ -40,6 +40,9 @@ struct ProcessedPrim {
     std::vector<float> clipZ;
     std::vector<float> uvU;
     std::vector<float> uvV;
+    std::vector<float> worldNX;        // skinned world-space normal X (unnormalized)
+    std::vector<float> worldNY;
+    std::vector<float> worldNZ;
     const MeshPrimitive* prim = nullptr;
 };
 
@@ -54,14 +57,6 @@ std::vector<ProcessedMesh> processVertices(
     const glm::mat4& viewProj,
     const std::vector<float>& morphWeights,  // [meshIdx][targetIdx] flattened
     int fbWidth, int fbHeight);
-
-// Rasterize a processed primitive into the framebuffer
-// yMin/yMax clip the scanline range (for parallel band rasterization)
-void rasterizePrim(
-    const ProcessedPrim& pp,
-    Framebuffer& fb,
-    const std::vector<TextureData>& textures,
-    int yMin = 0, int yMax = 0x7FFFFFFF);
 
 // --- Multithreaded variants ---
 

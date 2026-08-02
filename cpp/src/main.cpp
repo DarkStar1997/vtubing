@@ -47,7 +47,7 @@ int main(int argc, char** argv) {
 
     // Position camera for bust shot (upper ~35% of body)
     float dist = modelHeight * 0.35f / tanf(fovY * 0.5f);
-    glm::vec3 eye(center.x, targetY, center.z + dist);
+    glm::vec3 eye(center.x, targetY, center.z - dist);
     glm::vec3 target(center.x, targetY, center.z);
     glm::vec3 up(0, 1, 0);
 

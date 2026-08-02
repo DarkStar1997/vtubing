@@ -6,6 +6,45 @@
 #include <functional>
 #include <limits>
 #include <atomic>
+#include <cctype>
+#include <string>
+
+// Lighting: normalize(vec3(0.3, 0.8, 0.5)) — matches Python fragment shader
+static constexpr float LIGHT_INV_LEN = 1.0f / 0.989949373f; // 1/sqrt(0.98)
+static constexpr float LX = 0.3f * LIGHT_INV_LEN;
+static constexpr float LY = 0.8f * LIGHT_INV_LEN;
+static constexpr float LZ = 0.5f * LIGHT_INV_LEN;
+
+// VRM material naming: "{name}_{order}_{TAG}"
+// Render groups: 0=body, 1=hair, 2=face (has morphs)
+static int computeRenderOrder(const MeshPrimitive& prim) {
+    if (prim.morphCount > 0) return 2;
+    if (!prim.matName.empty()) {
+        size_t pos = prim.matName.rfind('_');
+        std::string tag = (pos != std::string::npos)
+            ? prim.matName.substr(pos + 1) : prim.matName;
+        std::transform(tag.begin(), tag.end(), tag.begin(),
+                       [](unsigned char c) { return std::toupper(c); });
+        if (tag == "HAIR") return 1;
+    }
+    return 0;
+}
+
+// Face part layering: skin→eyewhite→eyeline→brow→mouth→iris→highlight
+static int computeFaceSortKey(const std::string& matName) {
+    if (matName.empty()) return 7;
+    std::string low;
+    low.reserve(matName.size());
+    for (char c : matName) low.push_back((char)std::tolower((unsigned char)c));
+    if (low.find("skin") != std::string::npos) return 0;
+    if (low.find("eyewhite") != std::string::npos) return 1;
+    if (low.find("eyeline") != std::string::npos) return 2;
+    if (low.find("brow") != std::string::npos) return 3;
+    if (low.find("mouth") != std::string::npos) return 4;
+    if (low.find("iris") != std::string::npos) return 5;
+    if (low.find("highlight") != std::string::npos) return 6;
+    return 7;
+}
 
 // Persistent thread pool — created once, reused every frame
 static BS::thread_pool<>& getThreadPool() {
@@ -17,10 +56,13 @@ Framebuffer::Framebuffer(int w, int h)
     : width(w), height(h), color(w * h * 4, 0), depth(w * h, 1.0f) {}
 
 void Framebuffer::clear(float depthClear) {
-    std::fill(color.begin(), color.end(), 30); // dark background
-    // Set alpha to 255
-    for (int i = 3; i < width * height * 4; i += 4)
-        color[i] = 255;
+    // Match Python renderer background: (0.05, 0.05, 0.08)
+    for (int i = 0; i < width * height; i++) {
+        color[i * 4 + 0] = 13;
+        color[i * 4 + 1] = 13;
+        color[i * 4 + 2] = 20;
+        color[i * 4 + 3] = 255;
+    }
     std::fill(depth.begin(), depth.end(), depthClear);
 }
 
@@ -86,6 +128,9 @@ std::vector<ProcessedMesh> processVertices(
             pp.clipZ.resize(vc);
             pp.uvU.resize(vc);
             pp.uvV.resize(vc);
+            pp.worldNX.resize(vc);
+            pp.worldNY.resize(vc);
+            pp.worldNZ.resize(vc);
 
             for (int v = 0; v < vc; v++) {
                 // --- 1. Morph targets ---
@@ -157,25 +202,35 @@ std::vector<ProcessedMesh> processVertices(
                 // UVs (pass through, no transform)
                 pp.uvU[v] = prim.uvs.empty() ? 0 : prim.uvs[v * 2];
                 pp.uvV[v] = prim.uvs.empty() ? 0 : prim.uvs[v * 2 + 1];
+
+                // Skinned normal
+                if (!prim.normals.empty() && !prim.weights.empty() && !jointMatrices.empty()) {
+                    uint16_t j0 = prim.joints[v * 4 + 0];
+                    uint16_t j1 = prim.joints[v * 4 + 1];
+                    uint16_t j2 = prim.joints[v * 4 + 2];
+                    uint16_t j3 = prim.joints[v * 4 + 3];
+                    float w0 = prim.weights[v * 4 + 0];
+                    float w1 = prim.weights[v * 4 + 1];
+                    float w2 = prim.weights[v * 4 + 2];
+                    float w3 = prim.weights[v * 4 + 3];
+                    glm::vec3 n(prim.normals[v * 3], prim.normals[v * 3 + 1], prim.normals[v * 3 + 2]);
+                    glm::vec4 hn(n, 0.0f);
+                    glm::vec4 sn = (jointMatrices[j0] * hn) * w0 + (jointMatrices[j1] * hn) * w1
+                                 + (jointMatrices[j2] * hn) * w2 + (jointMatrices[j3] * hn) * w3;
+                    pp.worldNX[v] = sn.x;
+                    pp.worldNY[v] = sn.y;
+                    pp.worldNZ[v] = sn.z;
+                } else if (!prim.normals.empty()) {
+                    pp.worldNX[v] = prim.normals[v * 3];
+                    pp.worldNY[v] = prim.normals[v * 3 + 1];
+                    pp.worldNZ[v] = prim.normals[v * 3 + 2];
+                } else {
+                    pp.worldNX[v] = 0; pp.worldNY[v] = 1; pp.worldNZ[v] = 0;
+                }
             }
         }
     }
     return result;
-}
-
-static inline void sampleTextureNearest(
-    const TextureData& tex, float u, float v,
-    uint8_t out[4])
-{
-    // Clamp UVs to [0,1]
-    u = std::max(0.0f, std::min(1.0f, u));
-    v = std::max(0.0f, std::min(1.0f, v));
-    int x = static_cast<int>(u * tex.width);
-    int y = static_cast<int>(v * tex.height);
-    if (x >= tex.width) x = tex.width - 1;
-    if (y >= tex.height) y = tex.height - 1;
-    const uint8_t* px = &tex.pixels[(y * tex.width + x) * 4];
-    out[0] = px[0]; out[1] = px[1]; out[2] = px[2]; out[3] = px[3];
 }
 
 // Rasterize a single triangle. xMin/xMax/yMin/yMax are inclusive clip bounds.
@@ -185,7 +240,8 @@ static inline void rasterizeTri(
     int triIdx,
     Framebuffer& fb,
     const std::vector<TextureData>& textures,
-    int xMin, int xMax, int yMin, int yMax)
+    int xMin, int xMax, int yMin, int yMax,
+    bool depthTest, bool doubleSided)
 {
     const uint32_t* indices = prim.indices.data();
     uint32_t i0 = indices[triIdx * 3 + 0];
@@ -199,12 +255,22 @@ static inline void rasterizeTri(
     float u1 = pp.uvU[i1], v1uv = pp.uvV[i1];
     float u2 = pp.uvU[i2], v2uv = pp.uvV[i2];
 
-    // Backface culling (CCW front-facing)
+    // World-space normals (unnormalized; normalized per-pixel)
+    float n0x = pp.worldNX[i0], n0y = pp.worldNY[i0], n0z = pp.worldNZ[i0];
+    float n1x = pp.worldNX[i1], n1y = pp.worldNY[i1], n1z = pp.worldNZ[i1];
+    float n2x = pp.worldNX[i2], n2y = pp.worldNY[i2], n2z = pp.worldNZ[i2];
+
+    // Backface culling. Screen Y is inverted vs OpenGL NDC (Y-up),
+    // so CCW front-facing = area < 0 here, CW back-facing = area > 0.
     float area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
-    if (area < 0) {
-        if (!prim.doubleSided) return;
+    if (area > 0) {           // back-facing
+        if (!doubleSided) return;
+    }
+    // Ensure area > 0 for consistent edge-function rasterization
+    if (area < 0) {           // front-facing: swap to make area positive
         std::swap(x1, x2); std::swap(y1, y2); std::swap(z1, z2);
         std::swap(u1, u2); std::swap(v1uv, v2uv);
+        std::swap(n1x, n2x); std::swap(n1y, n2y); std::swap(n1z, n2z);
         area = -area;
     }
     if (area < 0.01f) return;
@@ -220,56 +286,98 @@ static inline void rasterizeTri(
     bool hasTex = prim.textureIndex >= 0 && prim.textureIndex < (int)textures.size();
     const TextureData* tex = hasTex ? &textures[prim.textureIndex] : nullptr;
 
+    const uint8_t* texPixels = nullptr;
+    int texW = 0, texH = 0;
+    if (tex) {
+        texPixels = tex->pixels.data();
+        texW = tex->width;
+        texH = tex->height;
+    }
+
+    // Precompute baseColor * ambient for no-lighting fast path
+    float bcr = prim.baseColor.r, bcg = prim.baseColor.g, bcb = prim.baseColor.b;
+
+    // --- Incremental edge functions ---
+    const float dE0dx = y1 - y2, dE0dy = x2 - x1;
+    const float dE1dx = y2 - y0, dE1dy = x0 - x2;
+    const float dE2dx = y0 - y1, dE2dy = x1 - x0;
+
+    // Initialize edge values at top-left pixel center
+    float fx0 = ix0 + 0.5f, fy0 = iy0 + 0.5f;
+    float e0_row = (x2 - x1) * (fy0 - y1) - (y2 - y1) * (fx0 - x1);
+    float e1_row = (x0 - x2) * (fy0 - y2) - (y0 - y2) * (fx0 - x2);
+    float e2_row = (x1 - x0) * (fy0 - y0) - (y1 - y0) * (fx0 - x0);
+
+    int rowOffset = iy0 * fb.width;
     for (int py = iy0; py <= iy1; py++) {
+        float e0 = e0_row, e1 = e1_row, e2 = e2_row;
+        int pixIdx = rowOffset + ix0;
         for (int px = ix0; px <= ix1; px++) {
-            float fx = px + 0.5f;
-            float fy = py + 0.5f;
+            if (e0 >= 0 && e1 >= 0 && e2 >= 0) {
+                float b0 = e0 * invArea;
+                float b1 = e1 * invArea;
+                float b2 = e2 * invArea;
+                float z = b0 * z0 + b1 * z1 + b2 * z2;
 
-            float e0 = (x2 - x1) * (fy - y1) - (y2 - y1) * (fx - x1);
-            float e1 = (x0 - x2) * (fy - y2) - (y0 - y2) * (fx - x2);
-            float e2 = (x1 - x0) * (fy - y0) - (y1 - y0) * (fx - x0);
+                if (!depthTest || z < fb.depth[pixIdx]) {
+                    fb.depth[pixIdx] = z;
 
-            if (e0 < 0 || e1 < 0 || e2 < 0) continue;
+                    // Lambertian diffuse lighting
+                    float nx = b0 * n0x + b1 * n1x + b2 * n2x;
+                    float ny = b0 * n0y + b1 * n1y + b2 * n2y;
+                    float nz = b0 * n0z + b1 * n1z + b2 * n2z;
+                    float nlen2 = nx * nx + ny * ny + nz * nz;
+                    float diff = 0.0f;
+                    if (nlen2 > 1e-12f) {
+                        float dot = (nx * LX + ny * LY + nz * LZ) / sqrtf(nlen2);
+                        if (dot > 0.0f) diff = dot;
+                    }
+                    float lit = 0.35f + 0.65f * diff;
+                    float fr = bcr * lit;
+                    float fg = bcg * lit;
+                    float fb_ = bcb * lit;
 
-            float b0 = e0 * invArea;
-            float b1 = e1 * invArea;
-            float b2 = e2 * invArea;
-            float z = b0 * z0 + b1 * z1 + b2 * z2;
-
-            int pixIdx = py * fb.width + px;
-            if (z < fb.depth[pixIdx]) {
-                fb.depth[pixIdx] = z;
-
-                uint8_t color[4];
-                if (tex) {
-                    float u = b0 * u0 + b1 * u1 + b2 * u2;
-                    float v = b0 * v0uv + b1 * v1uv + b2 * v2uv;
-                    sampleTextureNearest(*tex, u, v, color);
-                } else {
-                    color[0] = (uint8_t)(prim.baseColor.r * 255);
-                    color[1] = (uint8_t)(prim.baseColor.g * 255);
-                    color[2] = (uint8_t)(prim.baseColor.b * 255);
-                    color[3] = 255;
+                    if (texPixels) {
+                        float u = b0 * u0 + b1 * u1 + b2 * u2;
+                        float v = b0 * v0uv + b1 * v1uv + b2 * v2uv;
+                        u = std::max(0.0f, std::min(1.0f, u));
+                        v = std::max(0.0f, std::min(1.0f, v));
+                        int tx = static_cast<int>(u * texW);
+                        int ty = static_cast<int>(v * texH);
+                        if (tx >= texW) tx = texW - 1;
+                        if (ty >= texH) ty = texH - 1;
+                        const uint8_t* tpx = &texPixels[(ty * texW + tx) * 4];
+                        fb.color[pixIdx * 4 + 0] = (uint8_t)std::min(255.0f, tpx[0] * fr);
+                        fb.color[pixIdx * 4 + 1] = (uint8_t)std::min(255.0f, tpx[1] * fg);
+                        fb.color[pixIdx * 4 + 2] = (uint8_t)std::min(255.0f, tpx[2] * fb_);
+                    } else {
+                        fb.color[pixIdx * 4 + 0] = (uint8_t)std::min(255.0f, fr * 255.0f);
+                        fb.color[pixIdx * 4 + 1] = (uint8_t)std::min(255.0f, fg * 255.0f);
+                        fb.color[pixIdx * 4 + 2] = (uint8_t)std::min(255.0f, fb_ * 255.0f);
+                    }
+                    fb.color[pixIdx * 4 + 3] = 255;
                 }
-                fb.color[pixIdx * 4 + 0] = color[0];
-                fb.color[pixIdx * 4 + 1] = color[1];
-                fb.color[pixIdx * 4 + 2] = color[2];
-                fb.color[pixIdx * 4 + 3] = color[3];
             }
+            e0 += dE0dx; e1 += dE1dx; e2 += dE2dx;
+            pixIdx++;
         }
+        e0_row += dE0dy; e1_row += dE1dy; e2_row += dE2dy;
+        rowOffset += fb.width;
     }
 }
 
-void rasterizePrim(
+static void rasterizePrim(
     const ProcessedPrim& pp,
     Framebuffer& fb,
     const std::vector<TextureData>& textures,
-    int yMin, int yMax)
+    int yMin, int yMax,
+    bool depthTest, bool doubleSided)
 {
     const MeshPrimitive& prim = *pp.prim;
     int numTris = prim.triangleCount();
     for (int t = 0; t < numTris; t++)
-        rasterizeTri(pp, prim, t, fb, textures, 0, fb.width - 1, yMin, yMax - 1);
+        rasterizeTri(pp, prim, t, fb, textures, 0, fb.width - 1, yMin, yMax - 1,
+                     depthTest, doubleSided);
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +419,9 @@ std::vector<ProcessedMesh> processVerticesParallel(
             pp.clipZ.resize(vc);
             pp.uvU.resize(vc);
             pp.uvV.resize(vc);
+            pp.worldNX.resize(vc);
+            pp.worldNY.resize(vc);
+            pp.worldNZ.resize(vc);
             primsFlat.push_back({&prim, &pp, weightBase});
         }
     }
@@ -355,6 +466,19 @@ std::vector<ProcessedMesh> processVerticesParallel(
         pp.clipZ[v] = clip.z * invW;
         pp.uvU[v] = prim.uvs.empty() ? 0 : prim.uvs[v * 2];
         pp.uvV[v] = prim.uvs.empty() ? 0 : prim.uvs[v * 2 + 1];
+
+        // Skinned normal (w=0 ignores joint translation)
+        if (!prim.normals.empty()) {
+            glm::vec3 n(prim.normals[v * 3], prim.normals[v * 3 + 1], prim.normals[v * 3 + 2]);
+            glm::vec4 hn(n, 0.0f);
+            glm::vec4 sn = (jm[j[0]] * hn) * wt[0] + (jm[j[1]] * hn) * wt[1]
+                         + (jm[j[2]] * hn) * wt[2] + (jm[j[3]] * hn) * wt[3];
+            pp.worldNX[v] = sn.x;
+            pp.worldNY[v] = sn.y;
+            pp.worldNZ[v] = sn.z;
+        } else {
+            pp.worldNX[v] = 0; pp.worldNY[v] = 1; pp.worldNZ[v] = 0;
+        }
     };
 
     if (numThreads <= 1) {
@@ -399,30 +523,23 @@ std::vector<ProcessedMesh> processVerticesParallel(
 }
 
 // ---------------------------------------------------------------------------
-// Parallel rasterization (horizontal bands)
+// Parallel rasterization with VRM render ordering (body → hair → face)
 // ---------------------------------------------------------------------------
-void rasterizeParallel(
-    const std::vector<ProcessedMesh>& processed,
+struct PrimEntry {
+    const ProcessedPrim* pp;
+    int renderOrder;
+    int faceSortKey;
+    int origIndex;
+};
+
+// Tile-based binning + parallel rasterization for a subset of prims.
+static void rasterizePassTiles(
+    const PrimEntry* entries, int startIdx, int endIdx,
     Framebuffer& fb,
     const std::vector<TextureData>& textures,
-    int numThreads)
+    int numThreads,
+    bool depthTest, bool doubleSided)
 {
-    // Flatten all prims
-    const ProcessedPrim* allPrims[64];
-    int numPrims = 0;
-    for (size_t mi = 0; mi < processed.size(); mi++)
-        for (size_t pi = 0; pi < processed[mi].prims.size() && numPrims < 64; pi++)
-            allPrims[numPrims++] = &processed[mi].prims[pi];
-
-    if (numThreads <= 1) {
-        for (int i = 0; i < numPrims; i++)
-            rasterizePrim(*allPrims[i], fb, textures);
-        return;
-    }
-
-    // --- Tile-based parallel rasterization ---
-    // 1. Bin all triangles into tiles (each tri assigned to tiles it overlaps)
-    // 2. Threads pull tiles from atomic queue — only rasterize binned tris
     const int TILE = 64;
     int tilesX = (fb.width + TILE - 1) / TILE;
     int tilesY = (fb.height + TILE - 1) / TILE;
@@ -432,8 +549,8 @@ void rasterizeParallel(
     std::vector<std::vector<TriRef>> tileBins(numTiles);
 
     // Binning pass: assign each triangle to overlapping tiles
-    for (int pi = 0; pi < numPrims; pi++) {
-        const auto& pp = *allPrims[pi];
+    for (int k = startIdx; k < endIdx; k++) {
+        const auto& pp = *entries[k].pp;
         const auto& prim = *pp.prim;
         const auto& indices = prim.indices;
         int numTris = (int)indices.size() / 3;
@@ -448,17 +565,14 @@ void rasterizeParallel(
             int tx1 = std::min(tilesX - 1, (int)maxX / TILE);
             int ty0 = std::max(0, (int)minY / TILE);
             int ty1 = std::min(tilesY - 1, (int)maxY / TILE);
-            for (int ty = ty0; ty <= ty1; ty++) {
-                for (int tx = tx0; tx <= tx1; tx++) {
-                    tileBins[ty * tilesX + tx].push_back({allPrims[pi], t});
-                }
-            }
+            for (int ty = ty0; ty <= ty1; ty++)
+                for (int tx = tx0; tx <= tx1; tx++)
+                    tileBins[ty * tilesX + tx].push_back({entries[k].pp, t});
         }
     }
 
-    // Rasterize pass: atomic work queue over tiles
+    // Rasterize pass: atomic tile work queue
     std::atomic<int> next{0};
-
     auto worker = [&]() {
         while (true) {
             int tileIdx = next.fetch_add(1, std::memory_order_relaxed);
@@ -469,11 +583,11 @@ void rasterizeParallel(
             int yStart = ty * TILE;
             int xEnd = std::min(xStart + TILE, fb.width);
             int yEnd = std::min(yStart + TILE, fb.height);
-
             auto& bin = tileBins[tileIdx];
             for (auto& tr : bin)
                 rasterizeTri(*tr.pp, *tr.pp->prim, tr.triIdx, fb, textures,
-                             xStart, xEnd - 1, yStart, yEnd - 1);
+                             xStart, xEnd - 1, yStart, yEnd - 1,
+                             depthTest, doubleSided);
         }
     };
 
@@ -481,4 +595,58 @@ void rasterizeParallel(
     for (int t = 0; t < numThreads; t++)
         pool.detach_task(worker);
     pool.wait();
+}
+
+void rasterizeParallel(
+    const std::vector<ProcessedMesh>& processed,
+    Framebuffer& fb,
+    const std::vector<TextureData>& textures,
+    int numThreads)
+{
+    // 1. Flatten all prims with render-order metadata
+    std::vector<PrimEntry> entries;
+    int origIdx = 0;
+    for (const auto& mesh : processed)
+        for (const auto& prim : mesh.prims) {
+            int rorder = computeRenderOrder(*prim.prim);
+            int fskey = computeFaceSortKey(prim.prim->matName);
+            entries.push_back({&prim, rorder, fskey, origIdx++});
+        }
+    int numEntries = (int)entries.size();
+    if (numEntries == 0) return;
+
+    // 2. Sort: (renderOrder, faceSortKey for face parts, original index)
+    std::sort(entries.begin(), entries.end(), [](const PrimEntry& a, const PrimEntry& b) {
+        if (a.renderOrder != b.renderOrder) return a.renderOrder < b.renderOrder;
+        int ka = (a.renderOrder == 2) ? a.faceSortKey : 0;
+        int kb = (b.renderOrder == 2) ? b.faceSortKey : 0;
+        if (ka != kb) return ka < kb;
+        return a.origIndex < b.origIndex;
+    });
+
+    // 3. Process contiguous render-order groups as sequential passes
+    //    Body (0): depth test ON, no culling
+    //    Hair (1): depth test ON, cull backfaces
+    //    Face (2): depth test OFF (painter's algorithm), sorted by face part
+    int i = 0;
+    while (i < numEntries) {
+        int currentOrder = entries[i].renderOrder;
+        int j = i;
+        while (j < numEntries && entries[j].renderOrder == currentOrder)
+            j++;
+
+        bool depthTest = (currentOrder != 2);
+        bool doubleSided = (currentOrder == 0);
+
+        if (numThreads <= 1) {
+            for (int k = i; k < j; k++)
+                rasterizePrim(*entries[k].pp, fb, textures, 0, 0x7FFFFFFF,
+                              depthTest, doubleSided);
+        } else {
+            rasterizePassTiles(entries.data(), i, j, fb, textures, numThreads,
+                               depthTest, doubleSided);
+        }
+
+        i = j;
+    }
 }

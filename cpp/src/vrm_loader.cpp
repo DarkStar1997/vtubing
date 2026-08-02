@@ -228,6 +228,8 @@ VRMModel loadVRM(const std::string& path) {
                     prim->material->pbr_metallic_roughness.base_color_factor[2],
                     prim->material->pbr_metallic_roughness.base_color_factor[3]);
                 p.doubleSided = (prim->material->double_sided);
+                if (prim->material->name)
+                    p.matName = prim->material->name;
                 if (prim->material->pbr_metallic_roughness.base_color_texture.texture) {
                     const cgltf_texture* tex = prim->material->pbr_metallic_roughness.base_color_texture.texture;
                     if (tex->image) {
