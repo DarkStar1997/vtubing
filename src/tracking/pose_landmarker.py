@@ -33,6 +33,8 @@ _L_SHOULDER, _R_SHOULDER = 11, 12
 _L_ELBOW, _R_ELBOW = 13, 14
 _L_WRIST, _R_WRIST = 15, 16
 _L_HIP, _R_HIP = 23, 24
+_L_KNEE, _R_KNEE = 25, 26
+_L_ANKLE, _R_ANKLE = 27, 28
 
 _FILTER_CUTOFF = 1.0
 _FILTER_BETA = 0.05
@@ -114,6 +116,8 @@ class PoseTracker:
     # T-pose directions in VRM space: left arm points +X, right arm points -X
     _REST_L = np.array([1.0, 0.0, 0.0])
     _REST_R = np.array([-1.0, 0.0, 0.0])
+    # Legs point down in T-pose
+    _REST_DOWN = np.array([0.0, -1.0, 0.0])
 
     # MediaPipe world → VRM model space conversion.
     # MediaPipe: X=camera-right(+)=model-left(+), Y=up(+), Z=toward-camera(+)
@@ -124,7 +128,7 @@ class PoseTracker:
     def __init__(self, **kwargs: Any) -> None:
         self._landmarker = PoseLandmarker(**kwargs)
         # Filter rotation vectors (3 components each) — not direction vectors
-        names = ["lu", "ll", "ru", "rl"]
+        names = ["lu", "ll", "ru", "rl", "lul", "lll", "rul", "rll"]
         self._rot_filters: dict[str, list[OneEuroFilter]] = {
             n: [OneEuroFilter(_FILTER_CUTOFF, _FILTER_BETA) for _ in range(3)]
             for n in names
@@ -132,6 +136,7 @@ class PoseTracker:
         self._torso_filter = OneEuroFilter(_FILTER_CUTOFF, 0.0)
         self._spine_y_filter = OneEuroFilter(_FILTER_CUTOFF, 0.0)
         self._spine_z_filter = OneEuroFilter(_FILTER_CUTOFF, 0.0)
+        self._stand_filter = OneEuroFilter(0.5, 0.0)  # slow for smooth transitions
         self._torso_neutral: float | None = None
         self._spine_y_neutral: float | None = None
         self._spine_z_neutral: float | None = None
@@ -176,6 +181,23 @@ class PoseTracker:
         le, re = _lm_to_arr(lms[_L_ELBOW]), _lm_to_arr(lms[_R_ELBOW])
         lw, rw = _lm_to_arr(lms[_L_WRIST]), _lm_to_arr(lms[_R_WRIST])
         lh, rh = _lm_to_arr(lms[_L_HIP]), _lm_to_arr(lms[_R_HIP])
+
+        # Lower body landmarks (may have low visibility when sitting)
+        lk = _lm_to_arr(lms[_L_KNEE])
+        rk = _lm_to_arr(lms[_R_KNEE])
+        la = _lm_to_arr(lms[_L_ANKLE])
+        ra = _lm_to_arr(lms[_R_ANKLE])
+
+        # Check lower-body visibility
+        lower_visible = False
+        lower_vis_detail = {}
+        if result.pose_landmarks:
+            plms = result.pose_landmarks[0]
+            for idx, name in [(_L_KNEE, "lk"), (_R_KNEE, "rk"),
+                              (_L_ANKLE, "la"), (_R_ANKLE, "ra")]:
+                lower_vis_detail[name] = plms[idx].visibility
+            vis = sum(lower_vis_detail.values()) / 4.0
+            lower_visible = vis > 0.3
 
         # Image-space → VRM: X=right→model-left (keep), Y=down→up (negate),
         # Z=negative=closer-to-camera → VRM -Z=forward (keep, don't negate)
@@ -232,6 +254,13 @@ class PoseTracker:
         if self._spine_z_neutral is not None:
             spine_z -= self._spine_z_neutral
 
+        # --- Leg tracking (DISABLED — lower body rarely visible in facecam) ---
+        # Standing detection is handled in main.py via face-size comparison.
+        hip_mid = (lh + rh) / 2.0
+        shoulder_mid = (ls + rs) / 2.0
+        torso_len = float(np.linalg.norm(shoulder_mid - hip_mid))
+        standing = 0.0  # set by main.py face-size detection
+
         # Store debug info
         self.last_debug = {
             "ls": ls.tolist(), "le": le.tolist(), "lw": lw.tolist(),
@@ -242,7 +271,7 @@ class PoseTracker:
             "spine_z": spine_z,
         }
 
-        return {
+        result_dict = {
             "leftUpperArm": upper_l.as_quat().tolist(),
             "rightUpperArm": upper_r.as_quat().tolist(),
             "leftLowerArm": lower_l_local.as_quat().tolist(),
@@ -250,3 +279,4 @@ class PoseTracker:
             "torso": float(lean),
             "spine": [float(lean), float(spine_y), float(spine_z)],
         }
+        return result_dict

@@ -250,6 +250,9 @@ def main() -> None:
     _calib_shoulder_ys: list[float] = []
     _calib_twist: dict[str, list[float]] = {"left": [], "right": []}
     framing: dict | None = None
+    _calib_face_h: float = 0.0
+    _standing_filter = OneEuroFilter(0.4, 0.0)  # slow, smooth transitions
+    _stand_state = 0  # binary hysteresis state: 0=sit, 1=stand
 
     try:
         while not stop.is_set():
@@ -273,6 +276,7 @@ def main() -> None:
                     last_hand_result = hand_result
                     pose_result = pose_tracker.detect(rgb_buf, ts + 2)
                     last_pose = pose_tracker.extract_angles(pose_result, target_dt, last_hands)
+                    last_pose_result = pose_result
                     last_pose_result = pose_result
 
                     # Collect framing data during calibration
@@ -312,12 +316,29 @@ def main() -> None:
                     "face_center_y": face_center_y,
                     "shoulder_y": shoulder_y,
                 }
+                _calib_face_h = face_h
                 pose_tracker.calibrate_neutral()
                 # Skip twist calibration — use neutral=0 for both hands.
                 # The arcsin-based twist is ≈0 when palms face camera, which
                 # is the natural neutral. Calibration caused asymmetric deltas.
                 print(f"\n[main] framing: face_h={face_h:.3f} "
                       f"face_center={face_center_y:.3f} shoulder={shoulder_y:.3f}")
+            # Standing detection: hips visible in frame → user stepped back
+            # Uses hysteresis to prevent rapid flicker at the threshold edge.
+            _hip_vis = 0.0
+            if last_pose_result and last_pose_result.pose_landmarks:
+                plms = last_pose_result.pose_landmarks[0]
+                _hip_vis = (plms[23].visibility + plms[24].visibility) / 2.0
+            if _stand_state:
+                _stand_state = 0 if _hip_vis < 0.30 else 1  # lower threshold to exit stand
+            else:
+                _stand_state = 1 if _hip_vis > 0.50 else 0  # higher threshold to enter stand
+            standing = _standing_filter.filter(float(_stand_state), dt)
+
+            # Inject standing into pose dict
+            if last_pose is None:
+                last_pose = {}
+            last_pose["standing"] = standing
 
             server.broadcast(_state_to_ws(state, last_hands, last_pose, framing))
 
@@ -333,7 +354,9 @@ def main() -> None:
             elapsed = time.monotonic() - t0
             fps = frame_count / elapsed if elapsed > 0 else 0.0
             status = "calibrated" if solver.is_calibrated else "calibrating"
-            pose_tag = "pose" if last_pose else "no-pose"
+            pose_tag = "no-pose"
+            if last_pose:
+                pose_tag = "stand" if last_pose.get("standing", 0) > 0.5 else "sit"
             hand_tag = "hands:" + "".join(
                 s[0].upper() if last_hands and last_hands.get(s) else "-"
                 for s in ["left", "right"]
@@ -353,6 +376,7 @@ def main() -> None:
                 print(f"  R: sh→el=({d['ru'][0]:+.2f},{d['ru'][1]:+.2f},{d['ru'][2]:+.2f}) "
                       f"el→wr=({d['rl'][0]:+.2f},{d['rl'][1]:+.2f},{d['rl'][2]:+.2f})")
                 print(f"  lean={dbg['lean']:+.3f}  twist={dbg['spine_y']:+.3f}  lateral={dbg['spine_z']:+.3f}")
+                print(f"  standing={last_pose.get('standing', 0):.2f}" if last_pose else "")
                 # Hand detection debug
                 if last_hands:
                     for side in ["left", "right"]:

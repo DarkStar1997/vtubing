@@ -31,8 +31,9 @@ scene.add(fill);
 let vrm = null;
 let currentVrmUrl = null;
 let _framingApplied = false;
+let _sitCam = null;  // {dist, targetY, fov, tilt} — stored sitting framing
+let _standCam = null;  // full-body framing
 
-// Default rest pose — used when no body tracking data is available
 const _REST_POSE = {
   leftUpperArm:  { x: 0,    y: 0.20,  z: 1.30 },
   rightUpperArm: { x: 0,    y: -0.20, z: -1.30 },
@@ -44,11 +45,15 @@ function _applyPose(vrmModel, pose) {
   const h = vrmModel.humanoid;
   if (!h) return;
 
-  // Seated base posture — natural sitting at a desk
+  // Standing amount: 0 = sitting, 1 = standing
+  const standing = pose?.standing ?? 0;
+  const sit = 1.0 - standing;
+
+  // Base posture — blend seated lean vs upright
   const hips = _getBone("hips");
-  if (hips) hips.rotation.set(0.06, 0, 0);
+  if (hips) hips.rotation.set(0.06 * sit, 0, 0);
   const spine = _getBone("spine");
-  if (spine) spine.rotation.set(0.04, 0, 0);
+  if (spine) spine.rotation.set(0.04 * sit, 0, 0);
 
   if (pose && pose.leftUpperArm) {
     // Tracked pose — apply arm quaternions
@@ -60,7 +65,7 @@ function _applyPose(vrmModel, pose) {
       }
     }
     // Spine: forward lean + twist + lateral bend
-    const sp = pose.spine;  // [lean, twist, lateral]
+    const sp = pose.spine;
     const lean = sp ? sp[0] : (pose.torso ?? 0);
     const twist = sp ? sp[1] : 0;
     const lateral = sp ? sp[2] : 0;
@@ -68,10 +73,9 @@ function _applyPose(vrmModel, pose) {
     if (upperChest) upperChest.rotation.set(lean * 0.5, twist * 0.5, lateral * 0.5);
     const chest = _getBone("chest");
     if (chest) chest.rotation.set(lean * 0.3, twist * 0.3, lateral * 0.3);
-    // Distribute spine bend
-    if (spine) spine.rotation.set(0.04 + lean * 0.2, twist * 0.2, lateral * 0.2);
+    if (spine) spine.rotation.set(0.04 * sit + lean * 0.2, twist * 0.2, lateral * 0.2);
   } else {
-    // Fallback rest pose — relaxed A-pose for sitting
+    // Fallback rest pose — relaxed A-pose
     for (const [name, rot] of Object.entries(_REST_POSE)) {
       const bone = _getBone(name);
       if (bone) bone.rotation.set(rot.x, rot.y, rot.z);
@@ -175,6 +179,23 @@ function applyFraming(framing) {
   camera.updateProjectionMatrix();
 
   _framingApplied = true;
+
+  // Store sitting camera params for dynamic blending
+  _sitCam = { dist, targetY, fov, tilt: tiltOffset };
+
+  // Compute standing camera params (full body in frame)
+  const standFov = 30;
+  const standHalfFov = (standFov * Math.PI) / 360;
+  const standTan = Math.tan(standHalfFov);
+  const sceneCenter = sceneBox.getCenter(new THREE.Vector3());
+  const standDist = (sceneSize.y * 1.1) / (2 * standTan);
+  _standCam = {
+    dist: standDist,
+    targetY: sceneCenter.y,
+    fov: standFov,
+    tilt: 0.05,
+  };
+
   const screenFaceCenter = _projectToScreenY(modelFaceCenter);
   console.log("Framing applied:", {
     modelFaceH: modelFaceH.toFixed(4),
@@ -184,6 +205,19 @@ function applyFraming(framing) {
     screenFaceCenter: screenFaceCenter.toFixed(3),
     target: userFaceCenter.toFixed(3),
   });
+}
+
+function applyDynamicCamera(standing) {
+  if (!_sitCam || !_standCam) return;
+  const sit = 1.0 - standing;
+  const dist = _sitCam.dist * sit + _standCam.dist * standing;
+  const targetY = _sitCam.targetY * sit + _standCam.targetY * standing;
+  const fov = _sitCam.fov * sit + _standCam.fov * standing;
+  const tilt = _sitCam.tilt * sit + _standCam.tilt * standing;
+  camera.position.set(0, targetY + tilt, -dist);
+  camera.lookAt(0, targetY, 0);
+  camera.fov = fov;
+  camera.updateProjectionMatrix();
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +366,8 @@ function animate() {
   const dt = clock.getDelta();
   if (vrm) {
     if (latestRig?.framing) applyFraming(latestRig.framing);
+    const standing = latestRig?.pose?.standing ?? 0;
+    applyDynamicCamera(standing);
     _applyPose(vrm, latestRig?.pose);
     applyRig(latestRig);
     vrm.update(dt); // spring bones, etc.
