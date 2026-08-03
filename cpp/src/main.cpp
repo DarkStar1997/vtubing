@@ -37,18 +37,13 @@ int main(int argc, char** argv) {
     std::vector<glm::mat4> worldMatrices = computeWorldMatrices(model);
     std::vector<glm::mat4> jointMatrices = computeJointMatrices(model, worldMatrices);
 
-    // --- Camera: match Python renderer (head-relative) ---
-    glm::vec3 headPos(0.0f, 1.5f, 0.0f);  // fallback
-    if (model.headNodeIndex >= 0 && model.headNodeIndex < (int)worldMatrices.size()) {
-        headPos = glm::vec3(worldMatrices[model.headNodeIndex][3]);
-    }
-
-    glm::vec3 eye = headPos + glm::vec3(0.0f, 0.05f, -1.3f);
-    glm::vec3 target = headPos + glm::vec3(0.0f, -0.18f, 0.0f);
+    // --- Camera: match browser (frontend/avatar.js) ---
+    glm::vec3 eye(0.0f, 1.45f, -1.8f);
+    glm::vec3 target(0.0f, 1.32f, 0.0f);
     glm::vec3 up(0, 1, 0);
-    float fovY = glm::radians(28.0f);
+    float fovY = glm::radians(32.0f);
     float aspect = (float)fbWidth / fbHeight;
-    float nearZ = 0.05f;
+    float nearZ = 0.1f;
     float farZ = 100.0f;
 
     glm::mat4 proj = glm::perspective(fovY, aspect, nearZ, farZ);

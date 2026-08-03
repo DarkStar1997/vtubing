@@ -25,7 +25,13 @@ struct MeshPrimitive {
     int textureIndex = -1;             // index into VRMModel.textures
     glm::vec4 baseColor = {1, 1, 1, 1};
     bool doubleSided = false;
+    int alphaMode = 0;                 // 0=opaque, 1=mask, 2=blend
     std::string matName;               // VRM material name "{name}_{order}_{TAG}"
+
+    // VRM/MToon shader parameters (transformed per three-vrm convention)
+    glm::vec3 mtoonShadeColor = {1, 1, 1};
+    float mtoonRampScale = 10.0f;      // 1 / (2*(1-toony))
+    float mtoonRampBias = 0.0f;        // shift + 1 - toony
 
     int vertexCount() const { return static_cast<int>(positions.size() / 3); }
     int triangleCount() const { return static_cast<int>(indices.size() / 3); }

@@ -9,11 +9,21 @@
 #include <cctype>
 #include <string>
 
-// Lighting: normalize(vec3(0.3, 0.8, 0.5)) — matches Python fragment shader
-static constexpr float LIGHT_INV_LEN = 1.0f / 0.989949373f; // 1/sqrt(0.98)
-static constexpr float LX = 0.3f * LIGHT_INV_LEN;
-static constexpr float LY = 0.8f * LIGHT_INV_LEN;
-static constexpr float LZ = 0.5f * LIGHT_INV_LEN;
+// MToon lighting: matches browser frontend/avatar.js
+// Key directional: intensity 0.9, dir = normalize(1,2,-1.5)
+static constexpr float KX = 0.371391f, KY = 0.742781f, KZ = -0.557086f;
+static constexpr float KEY_INT = 0.9f;
+// Fill directional: intensity 0.3, dir = normalize(-1,1,-1)
+static constexpr float FX = -0.577350f, FY = 0.577350f, FZ = -0.577350f;
+static constexpr float FILL_INT = 0.3f;
+// Hemisphere: sky=(1,1,1), ground=(0.267,0.267,0.267)
+static constexpr float HEMI_GROUND = 0.267f;
+static constexpr float HEMI_DIFF = 1.0f - 0.267f;
+// Lambert BRDF: lightColor * diffuseColor / PI
+static constexpr float INV_PI = 0.318309886f;
+static constexpr float KEY_PI = KEY_INT * INV_PI;
+static constexpr float FILL_PI = FILL_INT * INV_PI;
+static constexpr float INV_255 = 1.0f / 255.0f;
 
 // VRM material naming: "{name}_{order}_{TAG}"
 // Render groups: 0=body, 1=hair, 2=face (has morphs)
@@ -241,7 +251,7 @@ static inline void rasterizeTri(
     Framebuffer& fb,
     const std::vector<TextureData>& textures,
     int xMin, int xMax, int yMin, int yMax,
-    bool depthTest, bool depthWrite, bool doubleSided)
+    bool depthTest, bool depthWrite)
 {
     const uint32_t* indices = prim.indices.data();
     uint32_t i0 = indices[triIdx * 3 + 0];
@@ -266,7 +276,7 @@ static inline void rasterizeTri(
     // So: cull area < 0 (CCW-world = back-facing in Python's flip_y setup).
     float area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
     if (area < 0) {           // back-facing for single-sided meshes
-        if (!doubleSided) return;
+        if (!prim.doubleSided) return;
         // Double-sided: flip winding to make area positive
         std::swap(x1, x2); std::swap(y1, y2); std::swap(z1, z2);
         std::swap(u1, u2); std::swap(v1uv, v2uv);
@@ -294,8 +304,14 @@ static inline void rasterizeTri(
         texH = tex->height;
     }
 
-    // Precompute baseColor * ambient for no-lighting fast path
+    // Per-triangle constants
     float bcr = prim.baseColor.r, bcg = prim.baseColor.g, bcb = prim.baseColor.b;
+    bool alphaBlend = (prim.alphaMode == 2);
+    float rampScale = prim.mtoonRampScale;
+    float rampBias = prim.mtoonRampBias;
+    float shadeR = prim.mtoonShadeColor.r;
+    float shadeG = prim.mtoonShadeColor.g;
+    float shadeB = prim.mtoonShadeColor.b;
 
     // --- Incremental edge functions ---
     const float dE0dx = y1 - y2, dE0dy = x2 - x1;
@@ -322,58 +338,94 @@ static inline void rasterizeTri(
                 if (!depthTest || z < fb.depth[pixIdx]) {
                     if (depthWrite) fb.depth[pixIdx] = z;
 
-                    // Lambertian diffuse lighting
-                    float nx = b0 * n0x + b1 * n1x + b2 * n2x;
-                    float ny = b0 * n0y + b1 * n1y + b2 * n2y;
-                    float nz = b0 * n0z + b1 * n1z + b2 * n2z;
-                    float nlen2 = nx * nx + ny * ny + nz * nz;
-                    float diff = 0.0f;
-                    if (nlen2 > 1e-12f) {
-                        float dot = (nx * LX + ny * LY + nz * LZ) / sqrtf(nlen2);
-                        if (dot > 0.0f) diff = dot;
-                    }
-                    float lit = 0.35f + 0.65f * diff;
-                    float fr = bcr * lit;
-                    float fg = bcg * lit;
-                    float fb_ = bcb * lit;
+                    // --- MToon toon shading ---
+                    // Normalize interpolated normal
+                    float nx = b0*n0x + b1*n1x + b2*n2x;
+                    float ny = b0*n0y + b1*n1y + b2*n2y;
+                    float nz = b0*n0z + b1*n1z + b2*n2z;
+                    float nlen2 = nx*nx + ny*ny + nz*nz;
+                    float invNlen = (nlen2 > 1e-20f) ? 1.0f / sqrtf(nlen2) : 1.0f;
+                    nx *= invNlen; ny *= invNlen; nz *= invNlen;
 
+                    // Sample texture → diffuseColor [0,1]
+                    float diffR = bcr, diffG = bcg, diffB = bcb;
+                    float texAlpha = 1.0f;
                     if (texPixels) {
                         float u = b0 * u0 + b1 * u1 + b2 * u2;
                         float v = b0 * v0uv + b1 * v1uv + b2 * v2uv;
-                        // Bilinear filtering (GL_LINEAR / CLAMP_TO_EDGE)
                         float fx = u * texW - 0.5f;
                         float fy = v * texH - 0.5f;
                         int tx0 = (int)floorf(fx);
                         int ty0 = (int)floorf(fy);
                         float wx = fx - tx0;
                         float wy = fy - ty0;
-                        int tx1 = tx0 + 1, ty1 = ty0 + 1;
+                        int tx1i = tx0 + 1, ty1i = ty0 + 1;
                         tx0 = std::max(0, std::min(tx0, texW - 1));
-                        tx1 = std::max(0, std::min(tx1, texW - 1));
+                        tx1i = std::max(0, std::min(tx1i, texW - 1));
                         ty0 = std::max(0, std::min(ty0, texH - 1));
-                        ty1 = std::max(0, std::min(ty1, texH - 1));
+                        ty1i = std::max(0, std::min(ty1i, texH - 1));
                         const uint8_t *t00 = &texPixels[(ty0 * texW + tx0) * 4];
-                        const uint8_t *t01 = &texPixels[(ty0 * texW + tx1) * 4];
-                        const uint8_t *t10 = &texPixels[(ty1 * texW + tx0) * 4];
-                        const uint8_t *t11 = &texPixels[(ty1 * texW + tx1) * 4];
+                        const uint8_t *t01 = &texPixels[(ty0 * texW + tx1i) * 4];
+                        const uint8_t *t10 = &texPixels[(ty1i * texW + tx0) * 4];
+                        const uint8_t *t11 = &texPixels[(ty1i * texW + tx1i) * 4];
                         float w00 = (1 - wx) * (1 - wy);
                         float w01 = wx * (1 - wy);
                         float w10 = (1 - wx) * wy;
                         float w11 = wx * wy;
-                        float tr = t00[0] * w00 + t01[0] * w01 + t10[0] * w10 + t11[0] * w11;
-                        float tg = t00[1] * w00 + t01[1] * w01 + t10[1] * w10 + t11[1] * w11;
-                        float tb = t00[2] * w00 + t01[2] * w01 + t10[2] * w10 + t11[2] * w11;
-                        fb.color[pixIdx * 4 + 0] = (uint8_t)std::min(255.0f, tr * fr);
-                        fb.color[pixIdx * 4 + 1] = (uint8_t)std::min(255.0f, tg * fg);
-                        fb.color[pixIdx * 4 + 2] = (uint8_t)std::min(255.0f, tb * fb_);
-                    } else {
-                        fb.color[pixIdx * 4 + 0] = (uint8_t)std::min(255.0f, fr * 255.0f);
-                        fb.color[pixIdx * 4 + 1] = (uint8_t)std::min(255.0f, fg * 255.0f);
-                        fb.color[pixIdx * 4 + 2] = (uint8_t)std::min(255.0f, fb_ * 255.0f);
+                        diffR = (t00[0]*w00 + t01[0]*w01 + t10[0]*w10 + t11[0]*w11) * INV_255 * bcr;
+                        diffG = (t00[1]*w00 + t01[1]*w01 + t10[1]*w10 + t11[1]*w11) * INV_255 * bcg;
+                        diffB = (t00[2]*w00 + t01[2]*w01 + t10[2]*w10 + t11[2]*w11) * INV_255 * bcb;
+                        if (alphaBlend)
+                            texAlpha = (t00[3]*w00 + t01[3]*w01 + t10[3]*w10 + t11[3]*w11) * INV_255;
                     }
-                    fb.color[pixIdx * 4 + 3] = 255;
+
+                    // Toon ramp: key light
+                    float dotNK = nx*KX + ny*KY + nz*KZ;
+                    float shK = (dotNK + rampBias) * rampScale;
+                    if (shK < 0) shK = 0; else if (shK > 1) shK = 1;
+                    // Fill light
+                    float dotNF = nx*FX + ny*FY + nz*FZ;
+                    float shF = (dotNF + rampBias) * rampScale;
+                    if (shF < 0) shF = 0; else if (shF > 1) shF = 1;
+
+                    // Direct diffuse: lightColor/PI * mix(shadeColor, diffuseColor, shading)
+                    float mr = shadeR + (diffR - shadeR) * shK;
+                    float mg = shadeG + (diffG - shadeG) * shK;
+                    float mb = shadeB + (diffB - shadeB) * shK;
+                    float r = KEY_PI * mr;
+                    float g = KEY_PI * mg;
+                    float b_ = KEY_PI * mb;
+                    mr = shadeR + (diffR - shadeR) * shF;
+                    mg = shadeG + (diffG - shadeG) * shF;
+                    mb = shadeB + (diffB - shadeB) * shF;
+                    r += FILL_PI * mr;
+                    g += FILL_PI * mg;
+                    b_ += FILL_PI * mb;
+
+                    // Hemisphere ambient (PI cancels: irradiance/PI * diffuse)
+                    float hemiW = 0.5f + 0.5f * ny;
+                    float hemiC = HEMI_GROUND + HEMI_DIFF * hemiW;
+                    r += hemiC * diffR;
+                    g += hemiC * diffG;
+                    b_ += hemiC * diffB;
+
+                    // Write pixel
+                    int ci = pixIdx * 4;
+                    if (alphaBlend && texAlpha < 1.0f) {
+                        if (texAlpha <= 0.0f) goto skip_pixel;
+                        float invA = 1.0f - texAlpha;
+                        fb.color[ci+0] = (uint8_t)std::min(255.0f, r * texAlpha * 255.0f + fb.color[ci+0] * invA);
+                        fb.color[ci+1] = (uint8_t)std::min(255.0f, g * texAlpha * 255.0f + fb.color[ci+1] * invA);
+                        fb.color[ci+2] = (uint8_t)std::min(255.0f, b_ * texAlpha * 255.0f + fb.color[ci+2] * invA);
+                    } else {
+                        fb.color[ci+0] = (uint8_t)std::min(255.0f, r * 255.0f);
+                        fb.color[ci+1] = (uint8_t)std::min(255.0f, g * 255.0f);
+                        fb.color[ci+2] = (uint8_t)std::min(255.0f, b_ * 255.0f);
+                    }
+                    fb.color[ci+3] = 255;
                 }
             }
+            skip_pixel:
             e0 += dE0dx; e1 += dE1dx; e2 += dE2dx;
             pixIdx++;
         }
@@ -387,13 +439,13 @@ static void rasterizePrim(
     Framebuffer& fb,
     const std::vector<TextureData>& textures,
     int yMin, int yMax,
-    bool depthTest, bool depthWrite, bool doubleSided)
+    bool depthTest, bool depthWrite)
 {
     const MeshPrimitive& prim = *pp.prim;
     int numTris = prim.triangleCount();
     for (int t = 0; t < numTris; t++)
         rasterizeTri(pp, prim, t, fb, textures, 0, fb.width - 1, yMin, yMax - 1,
-                     depthTest, depthWrite, doubleSided);
+                      depthTest, depthWrite);
 }
 
 // ---------------------------------------------------------------------------
@@ -554,7 +606,7 @@ static void rasterizePassTiles(
     Framebuffer& fb,
     const std::vector<TextureData>& textures,
     int numThreads,
-    bool depthTest, bool depthWrite, bool doubleSided)
+    bool depthTest, bool depthWrite)
 {
     const int TILE = 64;
     int tilesX = (fb.width + TILE - 1) / TILE;
@@ -603,7 +655,7 @@ static void rasterizePassTiles(
             for (auto& tr : bin)
                 rasterizeTri(*tr.pp, *tr.pp->prim, tr.triIdx, fb, textures,
                              xStart, xEnd - 1, yStart, yEnd - 1,
-                             depthTest, depthWrite, doubleSided);
+                              depthTest, depthWrite);
         }
     };
 
@@ -653,15 +705,14 @@ void rasterizeParallel(
 
         bool depthTest = (currentOrder != 2);
         bool depthWrite = (currentOrder != 2);
-        bool doubleSided = (currentOrder == 0);
 
         if (numThreads <= 1) {
             for (int k = i; k < j; k++)
                 rasterizePrim(*entries[k].pp, fb, textures, 0, 0x7FFFFFFF,
-                              depthTest, depthWrite, doubleSided);
+                              depthTest, depthWrite);
         } else {
             rasterizePassTiles(entries.data(), i, j, fb, textures, numThreads,
-                               depthTest, depthWrite, doubleSided);
+                      depthTest, depthWrite);
         }
 
         i = j;

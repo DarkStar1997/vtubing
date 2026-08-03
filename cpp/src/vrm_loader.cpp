@@ -9,6 +9,40 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <string>
+
+// --- Minimal JSON helpers for VRM extension parsing ---
+
+// Find a float value following a JSON key, starting from `pos`.
+static bool jsonFindFloat(const std::string& j, const std::string& key, size_t pos, float& out) {
+    size_t kp = j.find(key, pos);
+    if (kp == std::string::npos) return false;
+    size_t colon = j.find(':', kp + key.size());
+    if (colon == std::string::npos) return false;
+    size_t ns = j.find_first_of("-.0123456789", colon + 1);
+    if (ns == std::string::npos) return false;
+    size_t ne = j.find_first_not_of("-.0123456789", ns + 1);
+    if (ne == std::string::npos) ne = j.size();
+    try { out = std::stof(j.substr(ns, ne - ns)); } catch (...) { return false; }
+    return true;
+}
+
+// Find a 3-element float array following a JSON key.
+static bool jsonFindVec3(const std::string& j, const std::string& key, size_t pos, float out[3]) {
+    size_t kp = j.find(key, pos);
+    if (kp == std::string::npos) return false;
+    size_t bracket = j.find('[', kp + key.size());
+    if (bracket == std::string::npos) return false;
+    for (int i = 0; i < 3; i++) {
+        size_t ns = j.find_first_of("-.0123456789", bracket + 1);
+        if (ns == std::string::npos) return false;
+        size_t ne = j.find_first_not_of("-.0123456789", ns + 1);
+        if (ne == std::string::npos) return false;
+        try { out[i] = std::stof(j.substr(ns, ne - ns)); } catch (...) { return false; }
+        bracket = ne;
+    }
+    return true;
+}
 
 // Extract float data from a cgltf accessor into a flat vector.
 static void extractFloats(const cgltf_accessor* acc, std::vector<float>& out) {
@@ -71,7 +105,14 @@ VRMModel loadVRM(const std::string& path) {
         cgltf_free(data);
         return model;
     }
-    // Find head node from VRM humanoid extension
+    // Parse VRM extension: head node + MToon material properties
+    struct MtoonProps {
+        float shadeColor[3] = {1, 1, 1};
+        float shadeShift = 0;
+        float shadeToony = 0.9f;
+    };
+    std::vector<MtoonProps> mtoonMats;
+
     for (cgltf_size i = 0; i < data->data_extensions_count; i++) {
         const cgltf_extension* ext = &data->data_extensions[i];
         if (!ext->name || !ext->data) continue;
@@ -81,37 +122,66 @@ VRMModel loadVRM(const std::string& path) {
 
         if (ename == "VRM") {
             // VRM 0.x: humanoid.humanBones is array of {"bone":"head","node":N}
-            size_t pos = 0;
-            while ((pos = d.find("\"bone\"", pos)) != std::string::npos) {
-                size_t vc = d.find('"', d.find(':', pos) + 1);
-                size_t ve = d.find('"', vc + 1);
-                if (vc == std::string::npos || ve == std::string::npos) break;
-                std::string bn = d.substr(vc + 1, ve - vc - 1);
-                size_t objEnd = d.find('}', ve);
-                if (bn == "head") {
-                    size_t np = d.find("\"node\"", ve);
-                    if (np != std::string::npos && np < objEnd) {
-                        size_t ns = d.find_first_of("0123456789", d.find(':', np));
-                        size_t ne = d.find_first_not_of("0123456789", ns);
-                        model.headNodeIndex = std::stoi(d.substr(ns, ne - ns));
-                        break;
+            if (model.headNodeIndex < 0) {
+                size_t pos = 0;
+                while ((pos = d.find("\"bone\"", pos)) != std::string::npos) {
+                    size_t vc = d.find('"', d.find(':', pos) + 1);
+                    size_t ve = d.find('"', vc + 1);
+                    if (vc == std::string::npos || ve == std::string::npos) break;
+                    std::string bn = d.substr(vc + 1, ve - vc - 1);
+                    size_t objEnd = d.find('}', ve);
+                    if (bn == "head") {
+                        size_t np = d.find("\"node\"", ve);
+                        if (np != std::string::npos && np < objEnd) {
+                            size_t ns = d.find_first_of("0123456789", d.find(':', np));
+                            size_t ne = d.find_first_not_of("0123456789", ns);
+                            model.headNodeIndex = std::stoi(d.substr(ns, ne - ns));
+                            break;
+                        }
+                    }
+                    pos = ve + 1;
+                }
+            }
+
+            // VRM 0.x materialProperties: array aligned with glTF materials
+            size_t mp = d.find("\"materialProperties\"");
+            if (mp != std::string::npos) {
+                size_t arrStart = d.find('[', mp);
+                if (arrStart != std::string::npos) {
+                    int depth = 0;
+                    size_t objStart = std::string::npos;
+                    for (size_t k = arrStart + 1; k < d.size(); k++) {
+                        if (d[k] == '{') {
+                            if (depth == 0) objStart = k;
+                            depth++;
+                        } else if (d[k] == '}') {
+                            depth--;
+                            if (depth == 0 && objStart != std::string::npos) {
+                                MtoonProps mp_;
+                                jsonFindVec3(d, "_ShadeColor", objStart, mp_.shadeColor);
+                                jsonFindFloat(d, "_ShadeShift", objStart, mp_.shadeShift);
+                                jsonFindFloat(d, "_ShadeToony", objStart, mp_.shadeToony);
+                                mtoonMats.push_back(mp_);
+                                objStart = std::string::npos;
+                            }
+                        } else if (d[k] == ']' && depth == 0) break;
                     }
                 }
-                pos = ve + 1;
             }
         } else {
             // VRM 1.0: humanBones is dict {"head":{"node":N}}
-            size_t hp = d.find("\"head\"");
-            if (hp != std::string::npos) {
-                size_t np = d.find("\"node\"", hp);
-                if (np != std::string::npos) {
-                    size_t ns = d.find_first_of("0123456789", d.find(':', np));
-                    size_t ne = d.find_first_not_of("0123456789", ns);
-                    model.headNodeIndex = std::stoi(d.substr(ns, ne - ns));
+            if (model.headNodeIndex < 0) {
+                size_t hp = d.find("\"head\"");
+                if (hp != std::string::npos) {
+                    size_t np = d.find("\"node\"", hp);
+                    if (np != std::string::npos) {
+                        size_t ns = d.find_first_of("0123456789", d.find(':', np));
+                        size_t ne = d.find_first_not_of("0123456789", ns);
+                        model.headNodeIndex = std::stoi(d.substr(ns, ne - ns));
+                    }
                 }
             }
         }
-        if (model.headNodeIndex >= 0) break;
     }
 
     // --- Nodes ---
@@ -270,6 +340,7 @@ VRMModel loadVRM(const std::string& path) {
                     prim->material->pbr_metallic_roughness.base_color_factor[2],
                     prim->material->pbr_metallic_roughness.base_color_factor[3]);
                 p.doubleSided = (prim->material->double_sided);
+                p.alphaMode = (int)prim->material->alpha_mode;
                 if (prim->material->name)
                     p.matName = prim->material->name;
                 if (prim->material->pbr_metallic_roughness.base_color_texture.texture) {
@@ -277,6 +348,19 @@ VRMModel loadVRM(const std::string& path) {
                     if (tex->image) {
                         p.textureIndex = static_cast<int>(tex->image - data->images);
                     }
+                }
+
+                // MToon properties from VRM extension
+                int matIdx = static_cast<int>(prim->material - data->materials);
+                if (matIdx >= 0 && matIdx < (int)mtoonMats.size()) {
+                    auto& mp = mtoonMats[matIdx];
+                    p.mtoonShadeColor = glm::vec3(mp.shadeColor[0], mp.shadeColor[1], mp.shadeColor[2]);
+                    // Transform shadeShift/shadeToony per three-vrm convention
+                    float toony = mp.shadeToony + (1.0f - mp.shadeToony) * (0.5f + 0.5f * mp.shadeShift);
+                    float shift = -mp.shadeShift - (1.0f - toony);
+                    float rampWidth = 2.0f * (1.0f - toony);
+                    p.mtoonRampScale = (rampWidth > 1e-5f) ? (1.0f / rampWidth) : 100000.0f;
+                    p.mtoonRampBias = shift + 1.0f - toony;
                 }
             }
         }
