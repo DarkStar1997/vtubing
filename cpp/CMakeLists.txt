@@ -47,7 +47,8 @@ file(DOWNLOAD
 add_executable(vtuber_cpu
     src/main.cpp
     src/vrm_loader.cpp
-    src/rasterizer.cpp)
+    src/rasterizer.cpp
+    src/rasterizer_tri.cpp)
 
 target_include_directories(vtuber_cpu PRIVATE
     src
@@ -59,3 +60,6 @@ target_link_libraries(vtuber_cpu PRIVATE SDL3::SDL3 glm::glm)
 # AVX2 + FMA support
 target_compile_options(vtuber_cpu PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-mavx2 -mfma -mbmi2>)
+
+# Fast-math only on rasterizeTri (separate file to avoid breaking vertex transform)
+set_source_files_properties(src/rasterizer_tri.cpp PROPERTIES COMPILE_OPTIONS "-ffast-math")

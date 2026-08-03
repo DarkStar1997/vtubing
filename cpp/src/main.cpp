@@ -16,7 +16,7 @@ int main(int argc, char** argv) {
 
     // Parse args: [--bench N] [--ss N] [vrm_path]
     int benchFrames = 0;
-    int ss = 2;  // supersampling factor (2 = 4× SSAA)
+    int ss = 1;  // supersampling factor (1 = native, 2 = 4× SSAA)
     int argIdx = 1;
     while (argIdx < argc) {
         std::string arg = argv[argIdx];
