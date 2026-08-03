@@ -37,11 +37,32 @@ int main(int argc, char** argv) {
     std::vector<glm::mat4> worldMatrices = computeWorldMatrices(model);
     std::vector<glm::mat4> jointMatrices = computeJointMatrices(model, worldMatrices);
 
-    // --- Camera: match browser (frontend/avatar.js) ---
-    glm::vec3 eye(0.0f, 1.45f, -1.8f);
-    glm::vec3 target(0.0f, 1.32f, 0.0f);
+    // --- Camera: match browser loadVRM() bbox-based framing (avatar.js:114-126) ---
+    // Compute world-space bounding box of all mesh vertices
+    glm::vec3 bboxMin(1e9f), bboxMax(-1e9f);
+    for (size_t mi = 0; mi < model.meshes.size(); mi++) {
+        const auto& mesh = model.meshes[mi];
+        glm::mat4 nodeMat = (mesh.nodeIndex >= 0 && mesh.nodeIndex < (int)worldMatrices.size())
+            ? worldMatrices[mesh.nodeIndex] : glm::mat4(1.0f);
+        for (const auto& prim : mesh.primitives) {
+            int vc = prim.vertexCount();
+            for (int vi = 0; vi < vc; vi++) {
+                glm::vec4 p(prim.positions[vi * 3], prim.positions[vi * 3 + 1],
+                            prim.positions[vi * 3 + 2], 1.0f);
+                glm::vec3 wp = glm::vec3(nodeMat * p);
+                bboxMin = glm::min(bboxMin, wp);
+                bboxMax = glm::max(bboxMax, wp);
+            }
+        }
+    }
+    glm::vec3 centre = (bboxMin + bboxMax) * 0.5f;
+    glm::vec3 size = bboxMax - bboxMin;
+    float targetY = centre.y + size.y * 0.28f;
+    float camDist = std::max(size.y * 0.85f, 1.1f);
+    glm::vec3 eye(0.0f, targetY + 0.10f, -camDist);
+    glm::vec3 target(0.0f, targetY - 0.02f, 0.0f);
     glm::vec3 up(0, 1, 0);
-    float fovY = glm::radians(32.0f);
+    float fovY = glm::radians(28.0f);
     float aspect = (float)fbWidth / fbHeight;
     float nearZ = 0.1f;
     float farZ = 100.0f;

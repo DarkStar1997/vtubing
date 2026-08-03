@@ -26,6 +26,7 @@ struct MeshPrimitive {
     glm::vec4 baseColor = {1, 1, 1, 1};
     bool doubleSided = false;
     int alphaMode = 0;                 // 0=opaque, 1=mask, 2=blend
+    int renderQueue = 2450;            // VRM renderQueue (2450=opaque, 3000+=transparent)
     std::string matName;               // VRM material name "{name}_{order}_{TAG}"
 
     // VRM/MToon shader parameters (transformed per three-vrm convention)

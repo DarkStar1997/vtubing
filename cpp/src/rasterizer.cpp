@@ -23,38 +23,33 @@ static constexpr float HEMI_DIFF = 1.0f - 0.267f;
 static constexpr float INV_PI = 0.318309886f;
 static constexpr float KEY_PI = KEY_INT * INV_PI;
 static constexpr float FILL_PI = FILL_INT * INV_PI;
-static constexpr float INV_255 = 1.0f / 255.0f;
 
-// VRM material naming: "{name}_{order}_{TAG}"
-// Render groups: 0=body, 1=hair, 2=face (has morphs)
-static int computeRenderOrder(const MeshPrimitive& prim) {
-    if (prim.morphCount > 0) return 2;
-    if (!prim.matName.empty()) {
-        size_t pos = prim.matName.rfind('_');
-        std::string tag = (pos != std::string::npos)
-            ? prim.matName.substr(pos + 1) : prim.matName;
-        std::transform(tag.begin(), tag.end(), tag.begin(),
-                       [](unsigned char c) { return std::toupper(c); });
-        if (tag == "HAIR") return 1;
+// sRGB ↔ linear conversion LUTs (matches Three.js color management)
+static float sRGBToLinearLUT[256];       // texture byte → linear float [0,1]
+static uint8_t linearToSRGBLUT[1025];    // linear float [0,1] → sRGB byte (1024 steps)
+
+static inline uint8_t linToSRGB(float v) {
+    int idx = (int)(v * 1024.0f);
+    if (idx <= 0) return 0;
+    if (idx >= 1025) return 255;
+    return linearToSRGBLUT[idx];
+}
+
+static struct LUTInit {
+    LUTInit() {
+        for (int i = 0; i < 256; i++) {
+            float s = i / 255.0f;
+            sRGBToLinearLUT[i] = (s <= 0.04045f) ? s / 12.92f
+                                 : powf((s + 0.055f) / 1.055f, 2.4f);
+        }
+        for (int i = 0; i <= 1024; i++) {
+            float l = i / 1024.0f;
+            float s = (l <= 0.0031308f) ? l * 12.92f
+                      : 1.055f * powf(l, 1.0f / 2.4f) - 0.055f;
+            linearToSRGBLUT[i] = (uint8_t)std::min(255.0f, std::max(0.0f, s * 255.0f + 0.5f));
+        }
     }
-    return 0;
-}
-
-// Face part layering: skin→eyewhite→eyeline→brow→mouth→iris→highlight
-static int computeFaceSortKey(const std::string& matName) {
-    if (matName.empty()) return 7;
-    std::string low;
-    low.reserve(matName.size());
-    for (char c : matName) low.push_back((char)std::tolower((unsigned char)c));
-    if (low.find("skin") != std::string::npos) return 0;
-    if (low.find("eyewhite") != std::string::npos) return 1;
-    if (low.find("eyeline") != std::string::npos) return 2;
-    if (low.find("brow") != std::string::npos) return 3;
-    if (low.find("mouth") != std::string::npos) return 4;
-    if (low.find("iris") != std::string::npos) return 5;
-    if (low.find("highlight") != std::string::npos) return 6;
-    return 7;
-}
+} _lutInit;
 
 // Persistent thread pool — created once, reused every frame
 static BS::thread_pool<>& getThreadPool() {
@@ -66,13 +61,8 @@ Framebuffer::Framebuffer(int w, int h)
     : width(w), height(h), color(w * h * 4, 0), depth(w * h, 1.0f) {}
 
 void Framebuffer::clear(float depthClear) {
-    // Match Python renderer background: (0.05, 0.05, 0.08)
-    for (int i = 0; i < width * height; i++) {
-        color[i * 4 + 0] = 13;
-        color[i * 4 + 1] = 13;
-        color[i * 4 + 2] = 20;
-        color[i * 4 + 3] = 255;
-    }
+    // White background to match browser (three-vrm with transparent canvas over white page)
+    memset(color.data(), 255, width * height * 4);
     std::fill(depth.begin(), depth.end(), depthClear);
 }
 
@@ -261,6 +251,7 @@ static inline void rasterizeTri(
     float x0 = pp.screenX[i0], y0 = pp.screenY[i0], z0 = pp.clipZ[i0];
     float x1 = pp.screenX[i1], y1 = pp.screenY[i1], z1 = pp.clipZ[i1];
     float x2 = pp.screenX[i2], y2 = pp.screenY[i2], z2 = pp.clipZ[i2];
+
     float u0 = pp.uvU[i0], v0uv = pp.uvV[i0];
     float u1 = pp.uvU[i1], v1uv = pp.uvV[i1];
     float u2 = pp.uvU[i2], v2uv = pp.uvV[i2];
@@ -372,11 +363,11 @@ static inline void rasterizeTri(
                         float w01 = wx * (1 - wy);
                         float w10 = (1 - wx) * wy;
                         float w11 = wx * wy;
-                        diffR = (t00[0]*w00 + t01[0]*w01 + t10[0]*w10 + t11[0]*w11) * INV_255 * bcr;
-                        diffG = (t00[1]*w00 + t01[1]*w01 + t10[1]*w10 + t11[1]*w11) * INV_255 * bcg;
-                        diffB = (t00[2]*w00 + t01[2]*w01 + t10[2]*w10 + t11[2]*w11) * INV_255 * bcb;
+                        diffR = (sRGBToLinearLUT[t00[0]]*w00 + sRGBToLinearLUT[t01[0]]*w01 + sRGBToLinearLUT[t10[0]]*w10 + sRGBToLinearLUT[t11[0]]*w11) * bcr;
+                        diffG = (sRGBToLinearLUT[t00[1]]*w00 + sRGBToLinearLUT[t01[1]]*w01 + sRGBToLinearLUT[t10[1]]*w10 + sRGBToLinearLUT[t11[1]]*w11) * bcg;
+                        diffB = (sRGBToLinearLUT[t00[2]]*w00 + sRGBToLinearLUT[t01[2]]*w01 + sRGBToLinearLUT[t10[2]]*w10 + sRGBToLinearLUT[t11[2]]*w11) * bcb;
                         if (alphaBlend)
-                            texAlpha = (t00[3]*w00 + t01[3]*w01 + t10[3]*w10 + t11[3]*w11) * INV_255;
+                            texAlpha = (t00[3]*w00 + t01[3]*w01 + t10[3]*w10 + t11[3]*w11) * (1.0f/255.0f);
                     }
 
                     // Toon ramp: key light
@@ -402,25 +393,28 @@ static inline void rasterizeTri(
                     g += FILL_PI * mg;
                     b_ += FILL_PI * mb;
 
-                    // Hemisphere ambient (PI cancels: irradiance/PI * diffuse)
+                    // Hemisphere ambient: irradiance * diffuseColor / PI
                     float hemiW = 0.5f + 0.5f * ny;
-                    float hemiC = HEMI_GROUND + HEMI_DIFF * hemiW;
+                    float hemiC = (HEMI_GROUND + HEMI_DIFF * hemiW) * INV_PI;
                     r += hemiC * diffR;
                     g += hemiC * diffG;
                     b_ += hemiC * diffB;
 
-                    // Write pixel
+                    // Write pixel (convert linear → sRGB)
                     int ci = pixIdx * 4;
                     if (alphaBlend && texAlpha < 1.0f) {
                         if (texAlpha <= 0.0f) goto skip_pixel;
                         float invA = 1.0f - texAlpha;
-                        fb.color[ci+0] = (uint8_t)std::min(255.0f, r * texAlpha * 255.0f + fb.color[ci+0] * invA);
-                        fb.color[ci+1] = (uint8_t)std::min(255.0f, g * texAlpha * 255.0f + fb.color[ci+1] * invA);
-                        fb.color[ci+2] = (uint8_t)std::min(255.0f, b_ * texAlpha * 255.0f + fb.color[ci+2] * invA);
+                        uint8_t sr = linToSRGB(r);
+                        uint8_t sg = linToSRGB(g);
+                        uint8_t sb = linToSRGB(b_);
+                        fb.color[ci+0] = (uint8_t)(sr * texAlpha + fb.color[ci+0] * invA);
+                        fb.color[ci+1] = (uint8_t)(sg * texAlpha + fb.color[ci+1] * invA);
+                        fb.color[ci+2] = (uint8_t)(sb * texAlpha + fb.color[ci+2] * invA);
                     } else {
-                        fb.color[ci+0] = (uint8_t)std::min(255.0f, r * 255.0f);
-                        fb.color[ci+1] = (uint8_t)std::min(255.0f, g * 255.0f);
-                        fb.color[ci+2] = (uint8_t)std::min(255.0f, b_ * 255.0f);
+                        fb.color[ci+0] = linToSRGB(r);
+                        fb.color[ci+1] = linToSRGB(g);
+                        fb.color[ci+2] = linToSRGB(b_);
                     }
                     fb.color[ci+3] = 255;
                 }
@@ -591,12 +585,11 @@ std::vector<ProcessedMesh> processVerticesParallel(
 }
 
 // ---------------------------------------------------------------------------
-// Parallel rasterization with VRM render ordering (body → hair → face)
+// Parallel rasterization with VRM render ordering (opaque → transparent)
 // ---------------------------------------------------------------------------
 struct PrimEntry {
     const ProcessedPrim* pp;
-    int renderOrder;
-    int faceSortKey;
+    int renderQueue;
     int origIndex;
 };
 
@@ -671,50 +664,54 @@ void rasterizeParallel(
     const std::vector<TextureData>& textures,
     int numThreads)
 {
-    // 1. Flatten all prims with render-order metadata
+    // 1. Flatten all prims
     std::vector<PrimEntry> entries;
     int origIdx = 0;
     for (const auto& mesh : processed)
-        for (const auto& prim : mesh.prims) {
-            int rorder = computeRenderOrder(*prim.prim);
-            int fskey = computeFaceSortKey(prim.prim->matName);
-            entries.push_back({&prim, rorder, fskey, origIdx++});
-        }
+        for (const auto& prim : mesh.prims)
+            entries.push_back({&prim, prim.prim->renderQueue, origIdx++});
     int numEntries = (int)entries.size();
     if (numEntries == 0) return;
 
-    // 2. Sort: (renderOrder, faceSortKey for face parts, original index)
-    std::sort(entries.begin(), entries.end(), [](const PrimEntry& a, const PrimEntry& b) {
-        if (a.renderOrder != b.renderOrder) return a.renderOrder < b.renderOrder;
-        int ka = (a.renderOrder == 2) ? a.faceSortKey : 0;
-        int kb = (b.renderOrder == 2) ? b.faceSortKey : 0;
-        if (ka != kb) return ka < kb;
+    // 2. Split into opaque (alphaMode != 2) and transparent (alphaMode == 2)
+    std::vector<PrimEntry> opaque, transparent;
+    for (const auto& e : entries) {
+        if (e.pp->prim->alphaMode == 2)
+            transparent.push_back(e);
+        else
+            opaque.push_back(e);
+    }
+
+    // Opaque: sort by (renderQueue, origIndex) — depth buffer handles correctness
+    std::sort(opaque.begin(), opaque.end(), [](const PrimEntry& a, const PrimEntry& b) {
+        if (a.renderQueue != b.renderQueue) return a.renderQueue < b.renderQueue;
+        return a.origIndex < b.origIndex;
+    });
+    // Transparent: sort by renderQueue ascending (back-to-front: iris→highlight→brow→eyelash)
+    std::sort(transparent.begin(), transparent.end(), [](const PrimEntry& a, const PrimEntry& b) {
+        if (a.renderQueue != b.renderQueue) return a.renderQueue < b.renderQueue;
         return a.origIndex < b.origIndex;
     });
 
-    // 3. Process contiguous render-order groups as sequential passes
-    //    Body (0): depth test ON, no culling
-    //    Hair (1): depth test ON, cull backfaces
-    //    Face (2): depth test OFF (painter's algorithm), sorted by face part
-    int i = 0;
-    while (i < numEntries) {
-        int currentOrder = entries[i].renderOrder;
-        int j = i;
-        while (j < numEntries && entries[j].renderOrder == currentOrder)
-            j++;
-
-        bool depthTest = (currentOrder != 2);
-        bool depthWrite = (currentOrder != 2);
-
+    // 3. Opaque pass: depthTest=true, depthWrite=true
+    if (!opaque.empty()) {
         if (numThreads <= 1) {
-            for (int k = i; k < j; k++)
-                rasterizePrim(*entries[k].pp, fb, textures, 0, 0x7FFFFFFF,
-                              depthTest, depthWrite);
+            for (auto& e : opaque)
+                rasterizePrim(*e.pp, fb, textures, 0, 0x7FFFFFFF, true, true);
         } else {
-            rasterizePassTiles(entries.data(), i, j, fb, textures, numThreads,
-                      depthTest, depthWrite);
+            rasterizePassTiles(opaque.data(), 0, (int)opaque.size(), fb, textures, numThreads,
+                               true, true);
         }
+    }
 
-        i = j;
+    // 4. Transparent pass: depthTest=true, depthWrite=false (back-to-front blending)
+    if (!transparent.empty()) {
+        if (numThreads <= 1) {
+            for (auto& e : transparent)
+                rasterizePrim(*e.pp, fb, textures, 0, 0x7FFFFFFF, true, false);
+        } else {
+            rasterizePassTiles(transparent.data(), 0, (int)transparent.size(), fb, textures, numThreads,
+                               true, false);
+        }
     }
 }

@@ -10,6 +10,13 @@
 #include <cstring>
 #include <algorithm>
 #include <string>
+#include <cmath>
+
+// sRGB → linear conversion for material colors (matching Three.js color management)
+static inline float sRGBToLinear(float s) {
+    return (s <= 0.04045f) ? s / 12.92f
+                           : powf((s + 0.055f) / 1.055f, 2.4f);
+}
 
 // --- Minimal JSON helpers for VRM extension parsing ---
 
@@ -110,6 +117,8 @@ VRMModel loadVRM(const std::string& path) {
         float shadeColor[3] = {1, 1, 1};
         float shadeShift = 0;
         float shadeToony = 0.9f;
+        float cullMode = 2;  // VRM _CullMode: 0=off(doubleSided), 2=back
+        int renderQueue = 2450;
     };
     std::vector<MtoonProps> mtoonMats;
 
@@ -161,6 +170,10 @@ VRMModel loadVRM(const std::string& path) {
                                 jsonFindVec3(d, "_ShadeColor", objStart, mp_.shadeColor);
                                 jsonFindFloat(d, "_ShadeShift", objStart, mp_.shadeShift);
                                 jsonFindFloat(d, "_ShadeToony", objStart, mp_.shadeToony);
+                                jsonFindFloat(d, "_CullMode", objStart, mp_.cullMode);
+                                float rq = 2450;
+                                jsonFindFloat(d, "\"renderQueue\"", objStart, rq);
+                                mp_.renderQueue = (int)rq;
                                 mtoonMats.push_back(mp_);
                                 objStart = std::string::npos;
                             }
@@ -335,9 +348,9 @@ VRMModel loadVRM(const std::string& path) {
             // Material
             if (prim->material) {
                 p.baseColor = glm::vec4(
-                    prim->material->pbr_metallic_roughness.base_color_factor[0],
-                    prim->material->pbr_metallic_roughness.base_color_factor[1],
-                    prim->material->pbr_metallic_roughness.base_color_factor[2],
+                    sRGBToLinear(prim->material->pbr_metallic_roughness.base_color_factor[0]),
+                    sRGBToLinear(prim->material->pbr_metallic_roughness.base_color_factor[1]),
+                    sRGBToLinear(prim->material->pbr_metallic_roughness.base_color_factor[2]),
                     prim->material->pbr_metallic_roughness.base_color_factor[3]);
                 p.doubleSided = (prim->material->double_sided);
                 p.alphaMode = (int)prim->material->alpha_mode;
@@ -354,13 +367,19 @@ VRMModel loadVRM(const std::string& path) {
                 int matIdx = static_cast<int>(prim->material - data->materials);
                 if (matIdx >= 0 && matIdx < (int)mtoonMats.size()) {
                     auto& mp = mtoonMats[matIdx];
-                    p.mtoonShadeColor = glm::vec3(mp.shadeColor[0], mp.shadeColor[1], mp.shadeColor[2]);
+                    p.mtoonShadeColor = glm::vec3(
+                        sRGBToLinear(mp.shadeColor[0]),
+                        sRGBToLinear(mp.shadeColor[1]),
+                        sRGBToLinear(mp.shadeColor[2]));
                     // Transform shadeShift/shadeToony per three-vrm convention
                     float toony = mp.shadeToony + (1.0f - mp.shadeToony) * (0.5f + 0.5f * mp.shadeShift);
                     float shift = -mp.shadeShift - (1.0f - toony);
                     float rampWidth = 2.0f * (1.0f - toony);
                     p.mtoonRampScale = (rampWidth > 1e-5f) ? (1.0f / rampWidth) : 100000.0f;
                     p.mtoonRampBias = shift + 1.0f - toony;
+                    // VRM _CullMode overrides glTF doubleSided: 0=off(doubleSided), 2=back
+                    p.doubleSided = (mp.cullMode == 0.0f);
+                    p.renderQueue = mp.renderQueue;
                 }
             }
         }
