@@ -259,14 +259,12 @@ static inline void rasterizeTri(
     float n1x = pp.worldNX[i1], n1y = pp.worldNY[i1], n1z = pp.worldNZ[i1];
     float n2x = pp.worldNX[i2], n2y = pp.worldNY[i2], n2z = pp.worldNZ[i2];
 
-    // Backface culling. Python uses flip_y=True (negated proj[1][1]) + front_face='ccw'.
-    // With flip_y, CW-world triangles become CCW in NDC → front-facing → rendered.
-    // In C++'s Y-down screen space, CW-world → area > 0, CCW-world → area < 0.
-    // So: cull area < 0 (CCW-world = back-facing in Python's flip_y setup).
+    // VRM models have mixed-winding sub-meshes (e.g. eyeball spheres where
+    // ~half the triangles are back-facing). The browser (three-vrm) renders
+    // these without holes, so we render everything double-sided: swap winding
+    // on back-facing triangles to keep area positive for the rasterizer.
     float area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
-    if (area < 0) {           // back-facing for single-sided meshes
-        if (!prim.doubleSided) return;
-        // Double-sided: flip winding to make area positive
+    if (area < 0) {
         std::swap(x1, x2); std::swap(y1, y2); std::swap(z1, z2);
         std::swap(u1, u2); std::swap(v1uv, v2uv);
         std::swap(n1x, n2x); std::swap(n1y, n2y); std::swap(n1z, n2z);
