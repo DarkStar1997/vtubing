@@ -6,8 +6,6 @@
 #include <functional>
 #include <limits>
 #include <atomic>
-#include <cctype>
-#include <string>
 
 // MToon lighting: matches browser frontend/avatar.js
 // Key directional: intensity 0.9, dir = normalize(1,2,-1.5)
@@ -298,6 +296,7 @@ static inline void rasterizeTri(
     // Per-triangle constants
     float bcr = prim.baseColor.r, bcg = prim.baseColor.g, bcb = prim.baseColor.b;
     bool alphaBlend = (prim.alphaMode == 2);
+    bool alphaTest = (prim.alphaMode == 1);
     float rampScale = prim.mtoonRampScale;
     float rampBias = prim.mtoonRampBias;
     float shadeR = prim.mtoonShadeColor.r;
@@ -366,9 +365,10 @@ static inline void rasterizeTri(
                         diffR = (sRGBToLinearLUT[t00[0]]*w00 + sRGBToLinearLUT[t01[0]]*w01 + sRGBToLinearLUT[t10[0]]*w10 + sRGBToLinearLUT[t11[0]]*w11) * bcr;
                         diffG = (sRGBToLinearLUT[t00[1]]*w00 + sRGBToLinearLUT[t01[1]]*w01 + sRGBToLinearLUT[t10[1]]*w10 + sRGBToLinearLUT[t11[1]]*w11) * bcg;
                         diffB = (sRGBToLinearLUT[t00[2]]*w00 + sRGBToLinearLUT[t01[2]]*w01 + sRGBToLinearLUT[t10[2]]*w10 + sRGBToLinearLUT[t11[2]]*w11) * bcb;
-                        if (alphaBlend)
-                            texAlpha = (t00[3]*w00 + t01[3]*w01 + t10[3]*w10 + t11[3]*w11) * (1.0f/255.0f);
+                        texAlpha = (t00[3]*w00 + t01[3]*w01 + t10[3]*w10 + t11[3]*w11) * (1.0f/255.0f);
                     }
+
+                    if (alphaTest && texAlpha < 0.5f) goto skip_pixel;
 
                     // Toon ramp: key light
                     float dotNK = nx*KX + ny*KY + nz*KZ;
@@ -587,6 +587,7 @@ std::vector<ProcessedMesh> processVerticesParallel(
 // ---------------------------------------------------------------------------
 // Parallel rasterization with VRM render ordering (opaque → transparent)
 // ---------------------------------------------------------------------------
+
 struct PrimEntry {
     const ProcessedPrim* pp;
     int renderQueue;
@@ -668,12 +669,16 @@ void rasterizeParallel(
     std::vector<PrimEntry> entries;
     int origIdx = 0;
     for (const auto& mesh : processed)
-        for (const auto& prim : mesh.prims)
-            entries.push_back({&prim, prim.prim->renderQueue, origIdx++});
+        for (const auto& prim : mesh.prims) {
+            entries.push_back({&prim, prim.prim->renderQueue, origIdx});
+            origIdx++;
+        }
     int numEntries = (int)entries.size();
     if (numEntries == 0) return;
 
-    // 2. Split into opaque (alphaMode != 2) and transparent (alphaMode == 2)
+    // 2. Split into 2 groups (matching three.js):
+    //    - opaque: alphaMode != 2 → depthTest=true, depthWrite=true
+    //    - transparent: alphaMode == 2 → depthTest=true, depthWrite=false
     std::vector<PrimEntry> opaque, transparent;
     for (const auto& e : entries) {
         if (e.pp->prim->alphaMode == 2)
@@ -682,16 +687,14 @@ void rasterizeParallel(
             opaque.push_back(e);
     }
 
-    // Opaque: sort by (renderQueue, origIndex) — depth buffer handles correctness
-    std::sort(opaque.begin(), opaque.end(), [](const PrimEntry& a, const PrimEntry& b) {
-        if (a.renderQueue != b.renderQueue) return a.renderQueue < b.renderQueue;
-        return a.origIndex < b.origIndex;
-    });
-    // Transparent: sort by renderQueue ascending (back-to-front: iris→highlight→brow→eyelash)
-    std::sort(transparent.begin(), transparent.end(), [](const PrimEntry& a, const PrimEntry& b) {
-        if (a.renderQueue != b.renderQueue) return a.renderQueue < b.renderQueue;
-        return a.origIndex < b.origIndex;
-    });
+    auto sortByQueue = [](std::vector<PrimEntry>& v) {
+        std::sort(v.begin(), v.end(), [](const PrimEntry& a, const PrimEntry& b) {
+            if (a.renderQueue != b.renderQueue) return a.renderQueue < b.renderQueue;
+            return a.origIndex < b.origIndex;
+        });
+    };
+    sortByQueue(opaque);
+    sortByQueue(transparent);
 
     // 3. Opaque pass: depthTest=true, depthWrite=true
     if (!opaque.empty()) {
