@@ -715,3 +715,54 @@ void rasterizeParallel(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// 2× box-filter downsample (SSAA resolve)
+// ---------------------------------------------------------------------------
+void downsample2x2(const Framebuffer& ss, Framebuffer& out, int numThreads) {
+    int ow = out.width, oh = out.height;
+    int sw = ss.width;
+
+    auto processRows = [&](int yStart, int yEnd) {
+        for (int y = yStart; y < yEnd; y++) {
+            int sy0 = y * 2, sy1 = sy0 + 1;
+            const uint8_t* row0 = &ss.color[(sy0 * sw) * 4];
+            const uint8_t* row1 = &ss.color[(sy1 * sw) * 4];
+            uint8_t* outRow = &out.color[(y * ow) * 4];
+            const float* drow0 = &ss.depth[sy0 * sw];
+            const float* drow1 = &ss.depth[sy1 * sw];
+            float* outDepth = &out.depth[y * ow];
+            for (int x = 0; x < ow; x++) {
+                int sx0 = x * 2, sx1 = sx0 + 1;
+                const uint8_t* p0 = &row0[sx0 * 4];
+                const uint8_t* p1 = &row0[sx1 * 4];
+                const uint8_t* p2 = &row1[sx0 * 4];
+                const uint8_t* p3 = &row1[sx1 * 4];
+                int oi = x * 4;
+                outRow[oi+0] = (uint8_t)((p0[0] + p1[0] + p2[0] + p3[0] + 2) >> 2);
+                outRow[oi+1] = (uint8_t)((p0[1] + p1[1] + p2[1] + p3[1] + 2) >> 2);
+                outRow[oi+2] = (uint8_t)((p0[2] + p1[2] + p2[2] + p3[2] + 2) >> 2);
+                outRow[oi+3] = 255;
+                float dmin = drow0[sx0];
+                if (drow0[sx1] < dmin) dmin = drow0[sx1];
+                if (drow1[sx0] < dmin) dmin = drow1[sx0];
+                if (drow1[sx1] < dmin) dmin = drow1[sx1];
+                outDepth[x] = dmin;
+            }
+        }
+    };
+
+    if (numThreads <= 1) {
+        processRows(0, oh);
+    } else {
+        auto& pool = getThreadPool();
+        int chunkSize = std::max(1, (oh + numThreads - 1) / numThreads);
+        for (int t = 0; t < numThreads; t++) {
+            int yStart = t * chunkSize;
+            int yEnd = std::min(yStart + chunkSize, oh);
+            if (yStart >= yEnd) break;
+            pool.detach_task([&, yStart, yEnd]() { processRows(yStart, yEnd); });
+        }
+        pool.wait();
+    }
+}

@@ -75,3 +75,6 @@ void rasterizeParallel(
     Framebuffer& fb,
     const std::vector<TextureData>& textures,
     int numThreads);
+
+// Downsample a 2× supersampled framebuffer to output resolution (box filter)
+void downsample2x2(const Framebuffer& ss, Framebuffer& out, int numThreads);

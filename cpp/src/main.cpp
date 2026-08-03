@@ -14,17 +14,28 @@
 int main(int argc, char** argv) {
     std::string vrmPath = "../../assets/avatars/male_52blendshapes.vrm";
 
-    // Parse args: [--bench N] [vrm_path]
+    // Parse args: [--bench N] [--ss N] [vrm_path]
     int benchFrames = 0;
+    int ss = 2;  // supersampling factor (2 = 4× SSAA)
     int argIdx = 1;
-    if (argc >= 3 && std::string(argv[1]) == "--bench") {
-        benchFrames = std::atoi(argv[2]);
-        argIdx = 3;
+    while (argIdx < argc) {
+        std::string arg = argv[argIdx];
+        if (arg == "--bench" && argIdx + 1 < argc) {
+            benchFrames = std::atoi(argv[argIdx + 1]);
+            argIdx += 2;
+        } else if (arg == "--ss" && argIdx + 1 < argc) {
+            ss = std::atoi(argv[argIdx + 1]);
+            argIdx += 2;
+        } else {
+            vrmPath = arg;
+            argIdx++;
+        }
     }
-    if (argc > argIdx) vrmPath = argv[argIdx];
 
     int fbWidth = 1280;
     int fbHeight = 720;
+    int renderW = fbWidth * ss;
+    int renderH = fbHeight * ss;
 
     fprintf(stderr, "[main] loading VRM: %s\n", vrmPath.c_str());
     VRMModel model = loadVRM(vrmPath);
@@ -81,46 +92,53 @@ int main(int argc, char** argv) {
     morphWeights.resize(totalMorphs, 0.0f);
 
     // --- Framebuffer ---
-    Framebuffer fb(fbWidth, fbHeight);
+    Framebuffer ssfb(renderW, renderH);  // supersampled render target
+    Framebuffer fb(fbWidth, fbHeight);   // final output (downsampled)
 
     // --- Render one frame and time it ---
     int numThreads = std::min((int)std::thread::hardware_concurrency(), 16);
-    fprintf(stderr, "[main] threads: %d\n", numThreads);
+    fprintf(stderr, "[main] threads: %d, SS: %dx (%dx%d → %dx%d)\n",
+            numThreads, ss, renderW, renderH, fbWidth, fbHeight);
 
     if (benchFrames > 0) {
         fprintf(stderr, "\n=== BENCHMARK: %d frames ===\n", benchFrames);
         Timer btimer, timer;
-        double totalVert = 0, totalRast = 0;
+        double totalVert = 0, totalRast = 0, totalDown = 0;
         for (int f = 0; f < benchFrames; f++) {
             timer.reset();
-            auto proc = processVerticesParallel(model, jointMatrices, viewProj, morphWeights, fbWidth, fbHeight, numThreads);
+            auto proc = processVerticesParallel(model, jointMatrices, viewProj, morphWeights, renderW, renderH, numThreads);
             double vms = timer.elapsedMs();
             timer.reset();
-            fb.clear();
-            rasterizeParallel(proc, fb, model.textures, numThreads);
+            ssfb.clear();
+            rasterizeParallel(proc, ssfb, model.textures, numThreads);
             double rms = timer.elapsedMs();
+            timer.reset();
+            if (ss > 1) downsample2x2(ssfb, fb, numThreads);
+            double dms = timer.elapsedMs();
             totalVert += vms;
             totalRast += rms;
+            totalDown += dms;
         }
         double wallMs = btimer.elapsedMs();
-        fprintf(stderr, "Avg vertex: %.3f ms | Avg raster: %.3f ms\n",
-                totalVert / benchFrames, totalRast / benchFrames);
+        fprintf(stderr, "Avg vertex: %.3f ms | Avg raster: %.3f ms | Avg downsample: %.3f ms\n",
+                totalVert / benchFrames, totalRast / benchFrames, totalDown / benchFrames);
         fprintf(stderr, "Avg total:  %.3f ms (%.1f fps)\n",
                 wallMs / benchFrames, benchFrames * 1000.0 / wallMs);
 
         // Verify last frame: foreground pixel count
+        Framebuffer& out = (ss > 1) ? fb : ssfb;
         int fgCount = 0;
         for (int i = 0; i < fbWidth * fbHeight; i++)
-            if (fb.depth[i] < 1.0f) fgCount++;
+            if (out.depth[i] < 1.0f) fgCount++;
         fprintf(stderr, "Foreground pixels: %d / %d (%.1f%%)\n",
                 fgCount, fbWidth * fbHeight, 100.0f * fgCount / (fbWidth * fbHeight));
 
         // Save last frame for visual comparison
         std::vector<uint8_t> rgb(fbWidth * fbHeight * 3);
         for (int i = 0; i < fbWidth * fbHeight; i++) {
-            rgb[i * 3 + 0] = fb.color[i * 4 + 0];
-            rgb[i * 3 + 1] = fb.color[i * 4 + 1];
-            rgb[i * 3 + 2] = fb.color[i * 4 + 2];
+            rgb[i * 3 + 0] = out.color[i * 4 + 0];
+            rgb[i * 3 + 1] = out.color[i * 4 + 1];
+            rgb[i * 3 + 2] = out.color[i * 4 + 2];
         }
         stbi_write_png("output_bench.png", fbWidth, fbHeight, 3, rgb.data(), fbWidth * 3);
         fprintf(stderr, "Saved: output_bench.png\n");
@@ -132,26 +150,34 @@ int main(int argc, char** argv) {
 
     // Step 1: Vertex processing (parallel)
     timer.reset();
-    auto processed = processVerticesParallel(model, jointMatrices, viewProj, morphWeights, fbWidth, fbHeight, numThreads);
+    auto processed = processVerticesParallel(model, jointMatrices, viewProj, morphWeights, renderW, renderH, numThreads);
     double vertexMs = timer.elapsedMs();
 
-    // Step 2: Rasterization (parallel bands)
+    // Step 2: Rasterization (parallel, supersampled)
     timer.reset();
-    fb.clear();
-    rasterizeParallel(processed, fb, model.textures, numThreads);
+    ssfb.clear();
+    rasterizeParallel(processed, ssfb, model.textures, numThreads);
     double rasterMs = timer.elapsedMs();
-    double totalMs = vertexMs + rasterMs;
 
-    fprintf(stderr, "\n=== SCALAR + MULTITHREADED (%d threads) ===\n", numThreads);
+    // Step 3: Downsample SSAA → output
+    timer.reset();
+    if (ss > 1) downsample2x2(ssfb, fb, numThreads);
+    double downMs = timer.elapsedMs();
+
+    double totalMs = vertexMs + rasterMs + downMs;
+
+    fprintf(stderr, "\n=== SSAA %dx (%d threads) ===\n", ss, numThreads);
     fprintf(stderr, "Vertex processing: %.2f ms\n", vertexMs);
     fprintf(stderr, "Rasterization:     %.2f ms\n", rasterMs);
+    fprintf(stderr, "Downsample:        %.2f ms\n", downMs);
     fprintf(stderr, "Total:             %.2f ms (%.1f fps)\n", totalMs, 1000.0 / totalMs);
-    fprintf(stderr, "Resolution:        %dx%d\n", fbWidth, fbHeight);
+    fprintf(stderr, "Resolution:        %dx%d (render: %dx%d)\n", fbWidth, fbHeight, renderW, renderH);
 
     // Count foreground pixels
+    Framebuffer& out = (ss > 1) ? fb : ssfb;
     int fgCount = 0;
     for (int i = 0; i < fbWidth * fbHeight; i++) {
-        if (fb.depth[i] < 1.0f) fgCount++;
+        if (out.depth[i] < 1.0f) fgCount++;
     }
     fprintf(stderr, "Foreground pixels: %d / %d (%.1f%%)\n",
             fgCount, fbWidth * fbHeight, 100.0f * fgCount / (fbWidth * fbHeight));
@@ -160,9 +186,9 @@ int main(int argc, char** argv) {
     // Convert RGBA to RGB for stb_image_write
     std::vector<uint8_t> rgb(fbWidth * fbHeight * 3);
     for (int i = 0; i < fbWidth * fbHeight; i++) {
-        rgb[i * 3 + 0] = fb.color[i * 4 + 0];
-        rgb[i * 3 + 1] = fb.color[i * 4 + 1];
-        rgb[i * 3 + 2] = fb.color[i * 4 + 2];
+        rgb[i * 3 + 0] = out.color[i * 4 + 0];
+        rgb[i * 3 + 1] = out.color[i * 4 + 1];
+        rgb[i * 3 + 2] = out.color[i * 4 + 2];
     }
     stbi_write_png("output_cpp.png", fbWidth, fbHeight, 3, rgb.data(), fbWidth * 3);
     fprintf(stderr, "[main] saved output_cpp.png\n");
@@ -182,9 +208,9 @@ int main(int argc, char** argv) {
 
     std::vector<uint8_t> bgra(fbWidth * fbHeight * 4);
     for (int i = 0; i < fbWidth * fbHeight; i++) {
-        bgra[i * 4 + 0] = fb.color[i * 4 + 2];
-        bgra[i * 4 + 1] = fb.color[i * 4 + 1];
-        bgra[i * 4 + 2] = fb.color[i * 4 + 0];
+        bgra[i * 4 + 0] = out.color[i * 4 + 2];
+        bgra[i * 4 + 1] = out.color[i * 4 + 1];
+        bgra[i * 4 + 2] = out.color[i * 4 + 0];
         bgra[i * 4 + 3] = 255;
     }
 
