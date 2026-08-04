@@ -39,7 +39,7 @@ void HandTracker::detect(const Image& bgr, HandResult& result) {
     auto outputs = landmarker_->run(blob.data(), blob.size());
     if (outputs.size() < 4) return;
 
-    // Output 0: [1, 63] = 21 landmarks × 3 (image coords, normalized)
+    // Output 0: [1, 63] = 21 landmarks × 3 (pixel coords in 224×224 canvas)
     // Output 1: [1, 1]  = handedness (logit, sigmoid)
     // Output 2: [1, 1]  = presence (logit, sigmoid)
     // Output 3: [1, 63] = 21 world landmarks × 3 (metric)

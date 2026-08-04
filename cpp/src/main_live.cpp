@@ -193,9 +193,11 @@ int main(int argc, char** argv) {
                 // Hand skeleton
                 auto drawHandSkeleton = [&](const HandResult& hr) {
                     if (!hr.detected) return;
-                    auto toFrame = [&](float nx, float ny) {
-                        int px = (int)((nx * 224.0f - hr.lbPadX) / hr.lbScale) + hr.roiX;
-                        int py = (int)((ny * 224.0f - hr.lbPadY) / hr.lbScale) + hr.roiY;
+                    // Hand landmarker outputs landmarks in 224-canvas pixel
+                    // coords (NOT normalized); un-letterbox back to ROI frame.
+                    auto toFrame = [&](float px224, float py224) {
+                        int px = (int)((px224 - hr.lbPadX) / hr.lbScale) + hr.roiX;
+                        int py = (int)((py224 - hr.lbPadY) / hr.lbScale) + hr.roiY;
                         return std::make_pair(px, py);
                     };
                     uint8_t orange[3] = {0, 200, 255};   // BGR orange lines
