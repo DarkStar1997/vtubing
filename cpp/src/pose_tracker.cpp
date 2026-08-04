@@ -11,30 +11,31 @@ void PoseTracker::detect(const Image& bgr, PoseResult& result) {
 
     const int S = INPUT_SIZE;  // 640
 
-    // Letterbox: resize maintaining aspect ratio, pad to S×S
+    // Letterbox: resize maintaining aspect ratio, pad to S×S.
+    // RTMO expects raw [0,255] BGR (no /255 normalization), gray (114) padding,
+    // top-left alignment (matching rtmlib's preprocessing).
     float scale = (float)S / std::max(bgr.width, bgr.height);
     int newW = (int)(bgr.width * scale);
     int newH = (int)(bgr.height * scale);
-    int padX = (S - newW) / 2;
-    int padY = (S - newH) / 2;
+    const int PAD = 114;
 
     Image resized = resizeBilinear(bgr, newW, newH);
     Image canvas(S, S, bgr.channels);
-    memset(canvas.data.data(), 0, canvas.data.size());
+    for (size_t i = 0; i < canvas.data.size(); i++) canvas.data[i] = PAD;
     for (int y = 0; y < newH; y++) {
         const uint8_t* src = resized.ptr(y, 0);
-        uint8_t* dst = canvas.ptr(y + padY, padX);
+        uint8_t* dst = canvas.ptr(y, 0);
         memcpy(dst, src, newW * bgr.channels);
     }
 
-    // Preprocess: NCHW float32 [0,1], BGR→RGB
+    // Preprocess: NCHW float32, raw [0,255] BGR (RTMO does its own normalization)
     std::vector<float> blob(3 * S * S);
     for (int y = 0; y < S; y++) {
         for (int x = 0; x < S; x++) {
             const uint8_t* px = canvas.ptr(y, x);
-            blob[(0 * S + y) * S + x] = px[2] / 255.0f;  // R
-            blob[(1 * S + y) * S + x] = px[1] / 255.0f;  // G
-            blob[(2 * S + y) * S + x] = px[0] / 255.0f;  // B
+            blob[(0 * S + y) * S + x] = (float)px[2];  // R
+            blob[(1 * S + y) * S + x] = (float)px[1];  // G
+            blob[(2 * S + y) * S + x] = (float)px[0];  // B
         }
     }
 
@@ -64,9 +65,10 @@ void PoseTracker::detect(const Image& bgr, PoseResult& result) {
     result.detected = true;
     result.score = bestScore;
 
-    // Un-letterbox: convert from 640×640 space to original frame coords
-    auto unlbX = [&](float v) { return (v - padX) / scale; };
-    auto unlbY = [&](float v) { return (v - padY) / scale; };
+    // Un-letterbox: top-left padding means resized image starts at (0,0) in
+    // canvas, so un-projection is just value/scale back to original frame pixels.
+    auto unlbX = [&](float v) { return v / scale; };
+    auto unlbY = [&](float v) { return v / scale; };
 
     // Bounding box
     result.bboxX = unlbX(dets[bestIdx * 5 + 0]);
