@@ -34,6 +34,12 @@ struct HandResult {
     // the hand never appears detached from the wrist.
     float anchorX = -1.0f, anchorY = -1.0f;
 
+    // Elbow→wrist distance in frame pixels (from pose tracker). Used to
+    // rescale landmarks: the landmarker outputs fixed-scale landmarks
+    // (~115px wrist→midtip on 224-canvas) regardless of actual hand size,
+    // so we rescale to the anthropometric hand length (≈0.7× forearm).
+    float armLen = 0.0f;
+
     float lmX(int i) const { return landmarks[i * 3 + 0]; }
     float lmY(int i) const { return landmarks[i * 3 + 1]; }
     float lmZ(int i) const { return landmarks[i * 3 + 2]; }

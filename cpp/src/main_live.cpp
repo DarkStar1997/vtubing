@@ -158,6 +158,7 @@ int main(int argc, char** argv) {
                     if (h.detected) {
                         h.roiX = hrx; h.roiY = hry;
                         h.anchorX = (float)wx; h.anchorY = (float)wy;
+                        h.armLen = armLen;
                         outResult = h;
                     }
                 };
@@ -214,19 +215,44 @@ int main(int argc, char** argv) {
                         int py = (int)((py224 - hr.lbPadY) / hr.lbScale) + hr.roiY;
                         return std::make_pair(px, py);
                     };
-                    // Lock the hand wrist (lm 0) to the pose-tracker wrist so
-                    // the hand never appears detached/elongated from the arm.
-                    // Offset = anchor - lm0 (applied to all landmarks).
-                    auto [lm0x, lm0y] = toFrame(hr.lmX(0), hr.lmY(0));
-                    int offX = 0, offY = 0;
-                    if (hr.anchorX >= 0.0f) {
-                        offX = (int)hr.anchorX - lm0x;
-                        offY = (int)hr.anchorY - lm0y;
+
+                    // The landmarker returns FIXED-SCALE landmarks (~115px
+                    // wrist→midtip on the 224-canvas) regardless of the
+                    // actual hand size in the input. Without MediaPipe's
+                    // detector (which provides a tight rotation-normalized
+                    // crop), the landmarks are always ~50% of canvas scale.
+                    // Rescale to the anthropometric hand length (0.7× forearm).
+                    std::pair<int,int> frameLm[21];
+                    for (int i = 0; i < 21; i++)
+                        frameLm[i] = toFrame(hr.lmX(i), hr.lmY(i));
+
+                    // Anchor: lock the hand wrist (lm 0) to the pose-tracker
+                    // wrist so the hand never appears detached/elongated.
+                    int anchorX = frameLm[0].first;
+                    int anchorY = frameLm[0].second;
+                    if (hr.anchorX >= 0.0f) { anchorX = (int)hr.anchorX; anchorY = (int)hr.anchorY; }
+
+                    // Scale factor: expected hand length vs model's output
+                    float modelLen = 0;
+                    static const int tips[] = {4, 8, 12, 16, 20};
+                    for (int t : tips) {
+                        float dx = frameLm[t].first - frameLm[0].first;
+                        float dy = frameLm[t].second - frameLm[0].second;
+                        float d = std::sqrt(dx*dx + dy*dy);
+                        if (d > modelLen) modelLen = d;
                     }
-                    auto toFrameAnchored = [&](float px224, float py224) {
-                        auto [x, y] = toFrame(px224, py224);
-                        return std::make_pair(x + offX, y + offY);
+                    // Hand length ≈ 0.7 × forearm; fall back to 0.6×ROI if no armLen
+                    float expectedLen = (hr.armLen > 1.0f)
+                        ? hr.armLen * 0.7f
+                        : (hr.lbScale > 0 ? (224.0f / hr.lbScale) * 0.6f : modelLen);
+                    float scale = (modelLen > 1.0f) ? expectedLen / modelLen : 1.0f;
+
+                    auto toFrameScaled = [&](int i) {
+                        float dx = (frameLm[i].first - frameLm[0].first) * scale;
+                        float dy = (frameLm[i].second - frameLm[0].second) * scale;
+                        return std::make_pair((int)(anchorX + dx), (int)(anchorY + dy));
                     };
+
                     uint8_t orange[3] = {0, 200, 255};   // BGR orange lines
                     uint8_t dotBlue[3] = {255, 100, 0};   // BGR blue dots
                     static const int HAND_CONN[][2] = {
@@ -238,12 +264,12 @@ int main(int argc, char** argv) {
                         {0,17},
                     };
                     for (auto& c : HAND_CONN) {
-                        auto [x0, y0] = toFrameAnchored(hr.lmX(c[0]), hr.lmY(c[0]));
-                        auto [x1, y1] = toFrameAnchored(hr.lmX(c[1]), hr.lmY(c[1]));
+                        auto [x0, y0] = toFrameScaled(c[0]);
+                        auto [x1, y1] = toFrameScaled(c[1]);
                         drawLine(annotated, x0, y0, x1, y1, orange, 2);
                     }
                     for (int i = 0; i < 21; i++) {
-                        auto [px, py] = toFrameAnchored(hr.lmX(i), hr.lmY(i));
+                        auto [px, py] = toFrameScaled(i);
                         drawCircleFilled(annotated, px, py, 3, dotBlue);
                     }
                 };
