@@ -34,6 +34,8 @@ struct PoseResult {
 
     // Letterbox params for un-projecting landmarks to original frame coords
     float lbScale = 1.0f, lbPadX = 0.0f, lbPadY = 0.0f;
+    // ROI offset: landmarks are relative to this crop origin in the original frame
+    int roiX = 0, roiY = 0;
 
     // Convenience accessors
     float lmX(int i) const { return landmarks[i * 4 + 0]; }

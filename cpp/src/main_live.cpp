@@ -129,14 +129,38 @@ int main(int argc, char** argv) {
             faceTracker.detect(frame, result);
 
             PoseResult pose;
-            poseTracker.detect(frame, pose);
+            // Crop body ROI from face detection for the pose landmarker
+            // (the model expects a cropped person, not a full frame)
+            if (result.detected) {
+                float fcx = (result.bboxX1 + result.bboxX2) * 0.5f;
+                float fcy = (result.bboxY1 + result.bboxY2) * 0.5f;
+                float fw = result.bboxX2 - result.bboxX1;
+                float fh = result.bboxY2 - result.bboxY1;
+                // Body ROI: wide enough for arms, tall enough for torso
+                int roiSize = (int)std::max(fw * 3.0f, fh * 4.5f);
+                int roiX = (int)(fcx - roiSize * 0.5f);
+                int roiY = (int)(fcy - roiSize * 0.15f);
+                Image bodyCrop = cropImage(frame, roiX, roiY, roiSize, roiSize);
+                poseTracker.detect(bodyCrop, pose);
+                pose.roiX = roiX;
+                pose.roiY = roiY;
+            }
 
-            HandResult handLeft, handRight, handRaw;
-            handTracker.detect(frame, handRaw);
-            // Single-hand model: assign to left or right based on handedness score
-            if (handRaw.detected) {
-                if (handRaw.handedness > 0.5f) handLeft = handRaw;
-                else handRight = handRaw;
+            HandResult handLeft, handRight;
+            // Crop hand ROI from pose wrist landmark if available
+            if (pose.detected) {
+                auto detectHand = [&](int wristIdx, HandResult& outResult) {
+                    if (pose.lmVis(wristIdx) <= 0.3f) return;
+                    int wx = (int)((pose.lmX(wristIdx) * 256.0f - pose.lbPadX) / pose.lbScale) + pose.roiX;
+                    int wy = (int)((pose.lmY(wristIdx) * 256.0f - pose.lbPadY) / pose.lbScale) + pose.roiY;
+                    int hs = (int)std::max((float)frame.width * 0.15f, 80.0f);
+                    int hrx = wx - hs/2, hry = wy - hs/2;
+                    HandResult h;
+                    handTracker.detect(cropImage(frame, hrx, hry, hs, hs), h);
+                    if (h.detected) { h.roiX = hrx; h.roiY = hry; outResult = h; }
+                };
+                detectHand(PoseLandmarkIdx::L_WRIST, handLeft);
+                detectHand(PoseLandmarkIdx::R_WRIST, handRight);
             }
 
             Image annotated;
@@ -157,10 +181,10 @@ int main(int argc, char** argv) {
                     }
                 }
                 if (pose.detected) {
-                    // Un-project from letterbox-normalized coords to original frame pixels
+                    // Un-project from letterbox-normalized coords through ROI to original frame pixels
                     auto toFrame = [&](float nx, float ny) {
-                        int px = (int)((nx * 256.0f - pose.lbPadX) / pose.lbScale);
-                        int py = (int)((ny * 256.0f - pose.lbPadY) / pose.lbScale);
+                        int px = (int)((nx * 256.0f - pose.lbPadX) / pose.lbScale) + pose.roiX;
+                        int py = (int)((ny * 256.0f - pose.lbPadY) / pose.lbScale) + pose.roiY;
                         return std::make_pair(px, py);
                     };
                     uint8_t cyan[3] = {255, 255, 0};
@@ -192,8 +216,8 @@ int main(int argc, char** argv) {
                 auto drawHandSkeleton = [&](const HandResult& hr) {
                     if (!hr.detected) return;
                     auto toFrame = [&](float nx, float ny) {
-                        int px = (int)((nx * 224.0f - hr.lbPadX) / hr.lbScale);
-                        int py = (int)((ny * 224.0f - hr.lbPadY) / hr.lbScale);
+                        int px = (int)((nx * 224.0f - hr.lbPadX) / hr.lbScale) + hr.roiX;
+                        int py = (int)((ny * 224.0f - hr.lbPadY) / hr.lbScale) + hr.roiY;
                         return std::make_pair(px, py);
                     };
                     uint8_t orange[3] = {0, 200, 255};   // BGR orange lines

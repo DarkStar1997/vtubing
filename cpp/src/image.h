@@ -120,6 +120,22 @@ inline void drawCircleFilled(Image& img, int cx, int cy, int radius, const uint8
     }
 }
 
+inline Image cropImage(const Image& src, int x, int y, int w, int h) {
+    Image out(w, h, src.channels);
+    for (int dy = 0; dy < h; dy++) {
+        int sy = y + dy;
+        if (sy < 0 || sy >= src.height) continue;
+        for (int dx = 0; dx < w; dx++) {
+            int sx = x + dx;
+            if (sx < 0 || sx >= src.width) continue;
+            const uint8_t* sp = src.ptr(sy, sx);
+            uint8_t* dp = out.ptr(dy, dx);
+            for (int c = 0; c < src.channels; c++) dp[c] = sp[c];
+        }
+    }
+    return out;
+}
+
 inline void drawLine(Image& img, int x0, int y0, int x1, int y1, const uint8_t color[3], int thickness = 1) {
     int dx = std::abs(x1 - x0), dy = std::abs(y1 - y0);
     int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;

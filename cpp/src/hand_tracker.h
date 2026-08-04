@@ -26,6 +26,7 @@ struct HandResult {
 
     // Letterbox params for un-projecting landmarks to original frame coords
     float lbScale = 1.0f, lbPadX = 0.0f, lbPadY = 0.0f;
+    int roiX = 0, roiY = 0;
 
     float lmX(int i) const { return landmarks[i * 3 + 0]; }
     float lmY(int i) const { return landmarks[i * 3 + 1]; }
