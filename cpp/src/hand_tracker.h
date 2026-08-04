@@ -17,6 +17,7 @@ struct HandLandmarkIdx {
 struct HandResult {
     bool detected = false;
     float handedness = 0.0f;  // sigmoid score (0=right, 1=left typically)
+    float presence = 0.0f;    // sigmoid score (confidence a hand is in frame)
 
     // 21 landmarks, each x,y,z (pixel coords in the 224×224 letterbox canvas)
     std::array<float, 21 * 3> landmarks{};

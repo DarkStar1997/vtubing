@@ -49,9 +49,15 @@ void HandTracker::detect(const Image& bgr, HandResult& result) {
     auto& worldRaw = outputs[3];
 
     float presence = 1.0f / (1.0f + std::exp(-presenceRaw[0]));
-    if (presence < 0.5f) return;
+    // Threshold 0.75: the landmarker reliably scores real hands ≥0.9, while
+    // non-hand regions (forearm, torso, fist edges where fingertips vanish)
+    // sit around 0.5-0.65. A loose threshold accepts those low-confidence
+    // cases and the model falls back to its mean (extended-finger) prior,
+    // which is why curled fists appear straight in the PiP overlay.
+    if (presence < 0.75f) return;
 
     result.detected = true;
+    result.presence = presence;
     result.handedness = 1.0f / (1.0f + std::exp(-handedRaw[0]));
 
     for (int i = 0; i < 21; i++) {
