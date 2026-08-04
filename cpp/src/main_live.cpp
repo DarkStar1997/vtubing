@@ -133,32 +133,37 @@ int main(int argc, char** argv) {
             poseTracker.detect(frame, pose);
 
             // Hand tracking: crop ROIs from RTMO's accurate wrist positions.
-            // ROI size targets ~1× the elbow→wrist distance so the hand fills
-            // most of the 224×224 input the landmarker is trained on (hand
-            // length ≈ 0.7× forearm; ROI = 1× armLen gives ~30% margin).
-            // Larger ROIs leave the hand too small and the model falls back
-            // to its extended-finger prior, especially on curled fists.
+            // ROI size and annotation scale use face height as the reference
+            // (hand length ≈ face height — a proportion robust to forearm
+            // foreshortening, which makes armLen unreliable when arms point
+            // toward the camera). ROI is shifted toward the fingertips so
+            // the full hand is captured.
             HandResult handLeft, handRight;
             if (pose.detected) {
-                float shoulderDist = std::abs(pose.kpX(PoseLandmarkIdx::L_SHOULDER) -
-                                              pose.kpX(PoseLandmarkIdx::R_SHOULDER));
+                float faceHeight = result.detected
+                    ? (result.bboxY2 - result.bboxY1) : 0.0f;
+                float handRef = faceHeight > 0.0f ? faceHeight : 150.0f;
                 auto detectHand = [&](int wristIdx, int elbowIdx, HandResult& outResult) {
                     if (pose.kpScore(wristIdx) < 0.3f) return;
                     int wx = (int)pose.kpX(wristIdx);
                     int wy = (int)pose.kpY(wristIdx);
-                    float armLen = 0.0f;
+                    // Shift ROI center toward fingertips (away from elbow)
+                    float dirX = 0, dirY = 0;
                     if (pose.kpScore(elbowIdx) > 0.3f) {
                         float ex = pose.kpX(elbowIdx), ey = pose.kpY(elbowIdx);
-                        armLen = std::sqrt((wx - ex) * (wx - ex) + (wy - ey) * (wy - ey));
+                        float armLen = std::sqrt((wx-ex)*(wx-ex) + (wy-ey)*(wy-ey));
+                        if (armLen > 1.0f) { dirX = (wx-ex)/armLen; dirY = (wy-ey)/armLen; }
                     }
-                    int hs = (int)std::max({armLen * 1.0f, shoulderDist * 0.65f, 120.0f});
-                    int hrx = wx - hs / 2, hry = wy - hs / 2;
+                    int hs = (int)std::max({handRef * 1.2f, 120.0f});
+                    int cx = wx + (int)(dirX * handRef * 0.3f);
+                    int cy = wy + (int)(dirY * handRef * 0.3f);
+                    int hrx = cx - hs / 2, hry = cy - hs / 2;
                     HandResult h;
                     handTracker.detect(cropImage(frame, hrx, hry, hs, hs), h);
                     if (h.detected) {
                         h.roiX = hrx; h.roiY = hry;
                         h.anchorX = (float)wx; h.anchorY = (float)wy;
-                        h.armLen = armLen;
+                        h.armLen = handRef;  // face height = expected hand length
                         outResult = h;
                     }
                 };
@@ -232,7 +237,11 @@ int main(int argc, char** argv) {
                     int anchorY = frameLm[0].second;
                     if (hr.anchorX >= 0.0f) { anchorX = (int)hr.anchorX; anchorY = (int)hr.anchorY; }
 
-                    // Scale factor: expected hand length vs model's output
+                    // Scale factor: expected hand length vs model's output.
+                    // The landmarker always returns ~115px wrist→midtip on
+                    // the 224-canvas regardless of actual hand size, so we
+                    // scale to the expected hand length (≈ face height, stored
+                    // in hr.armLen).
                     float modelLen = 0;
                     static const int tips[] = {4, 8, 12, 16, 20};
                     for (int t : tips) {
@@ -241,10 +250,8 @@ int main(int argc, char** argv) {
                         float d = std::sqrt(dx*dx + dy*dy);
                         if (d > modelLen) modelLen = d;
                     }
-                    // Hand length ≈ 0.7 × forearm; fall back to 0.6×ROI if no armLen
-                    float expectedLen = (hr.armLen > 1.0f)
-                        ? hr.armLen * 0.7f
-                        : (hr.lbScale > 0 ? (224.0f / hr.lbScale) * 0.6f : modelLen);
+                    // Hand length ≈ face height (stored in armLen field)
+                    float expectedLen = (hr.armLen > 1.0f) ? hr.armLen : modelLen;
                     float scale = (modelLen > 1.0f) ? expectedLen / modelLen : 1.0f;
 
                     auto toFrameScaled = [&](int i) {
