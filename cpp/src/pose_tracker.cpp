@@ -2,81 +2,83 @@
 #include <algorithm>
 
 PoseTracker::PoseTracker(const std::string& modelPath) {
-    landmarker_ = std::make_unique<OnnxSession>(modelPath);
-}
-
-Image PoseTracker::letterbox(const Image& src, int size, float& scale, float& padX, float& padY) {
-    int h = src.height, w = src.width;
-    scale = (float)size / std::max(h, w);
-    padX = (size - w * scale) / 2.0f;
-    padY = (size - h * scale) / 2.0f;
-    float M[6] = {scale, 0, padX, 0, scale, padY};
-    return warpAffine(src, M, size, size);
+    session_ = std::make_unique<OnnxSession>(modelPath);
 }
 
 void PoseTracker::detect(const Image& bgr, PoseResult& result) {
     result.detected = false;
-
     if (bgr.empty()) return;
 
-    const int SIZE = 256;
-    float scale, padX, padY;
-    Image canvas = letterbox(bgr, SIZE, scale, padX, padY);
-    result.lbScale = scale;
-    result.lbPadX = padX;
-    result.lbPadY = padY;
+    const int S = INPUT_SIZE;  // 640
 
-    // Preprocess: NHWC float32 [0,1], BGR→RGB
-    // Input shape: [1, 256, 256, 3]
-    std::vector<float> blob(SIZE * SIZE * 3);
-    for (int y = 0; y < SIZE; y++) {
-        for (int x = 0; x < SIZE; x++) {
+    // Letterbox: resize maintaining aspect ratio, pad to S×S
+    float scale = (float)S / std::max(bgr.width, bgr.height);
+    int newW = (int)(bgr.width * scale);
+    int newH = (int)(bgr.height * scale);
+    int padX = (S - newW) / 2;
+    int padY = (S - newH) / 2;
+
+    Image resized = resizeBilinear(bgr, newW, newH);
+    Image canvas(S, S, bgr.channels);
+    memset(canvas.data.data(), 0, canvas.data.size());
+    for (int y = 0; y < newH; y++) {
+        const uint8_t* src = resized.ptr(y, 0);
+        uint8_t* dst = canvas.ptr(y + padY, padX);
+        memcpy(dst, src, newW * bgr.channels);
+    }
+
+    // Preprocess: NCHW float32 [0,1], BGR→RGB
+    std::vector<float> blob(3 * S * S);
+    for (int y = 0; y < S; y++) {
+        for (int x = 0; x < S; x++) {
             const uint8_t* px = canvas.ptr(y, x);
-            int idx = (y * SIZE + x) * 3;
-            blob[idx + 0] = px[2] / 255.0f; // R
-            blob[idx + 1] = px[1] / 255.0f; // G
-            blob[idx + 2] = px[0] / 255.0f; // B
+            blob[(0 * S + y) * S + x] = px[2] / 255.0f;  // R
+            blob[(1 * S + y) * S + x] = px[1] / 255.0f;  // G
+            blob[(2 * S + y) * S + x] = px[0] / 255.0f;  // B
         }
     }
 
-    auto outputs = landmarker_->run(blob.data(), blob.size());
+    auto outputs = session_->run(blob.data(), blob.size());
+    if (outputs.size() < 2) return;
 
-    // Output[0]: [1, 195] = 39 landmarks × 5 (x, y, z, visibility, presence)
-    // Output[1]: [1, 1] = person presence (logit, needs sigmoid)
-    // Output[4]: [1, 117] = 39 landmarks × 3 world coords (metric, meters)
-    if (outputs.size() < 5) return;
+    // Output[0]: dets [1, N, 5] — cx, cy, w, h, score (in 640×640 pixel space)
+    // Output[1]: keypoints [1, N, 17, 3] — x, y, score (in 640×640 pixel space)
+    auto& dets = outputs[0];
+    auto& kps = outputs[1];
 
-    auto& lmRaw = outputs[0];   // 195 values
-    auto& presenceRaw = outputs[1]; // 1 value
-    auto& worldRaw = outputs[4];    // 117 values
+    int nPersons = (int)dets.size() / 5;
+    if (nPersons == 0) return;
 
-    // Person presence: sigmoid
-    float presenceLogit = presenceRaw[0];
-    result.presence = 1.0f / (1.0f + std::exp(-presenceLogit));
-
-    if (result.presence < 0.3f) return;
-
-    result.detected = true;
-
-    // Parse 39 landmarks
-    for (int i = 0; i < 39; i++) {
-        float px = lmRaw[i * 5 + 0];
-        float py = lmRaw[i * 5 + 1];
-        float pz = lmRaw[i * 5 + 2];
-        float visLogit = lmRaw[i * 5 + 3];
-        float vis = 1.0f / (1.0f + std::exp(-visLogit));
-
-        // Normalize pixel coords to [0,1] relative to input canvas
-        result.landmarks[i * 4 + 0] = px / SIZE;
-        result.landmarks[i * 4 + 1] = py / SIZE;
-        result.landmarks[i * 4 + 2] = pz / SIZE;
-        result.landmarks[i * 4 + 3] = vis;
+    // Find best person
+    int bestIdx = 0;
+    float bestScore = dets[4];
+    for (int i = 1; i < nPersons; i++) {
+        if (dets[i * 5 + 4] > bestScore) {
+            bestScore = dets[i * 5 + 4];
+            bestIdx = i;
+        }
     }
 
-    // Parse world landmarks
-    for (int i = 0; i < 39; i++) {
-        result.worldLandmarks[i * 3 + 0] = worldRaw[i * 3 + 0];
-        result.worldLandmarks[i * 3 + 1] = worldRaw[i * 3 + 1];
-        result.worldLandmarks[i * 3 + 2] = worldRaw[i * 3 + 2];
+    if (bestScore < 0.3f) return;
+
+    result.detected = true;
+    result.score = bestScore;
+
+    // Un-letterbox: convert from 640×640 space to original frame coords
+    auto unlbX = [&](float v) { return (v - padX) / scale; };
+    auto unlbY = [&](float v) { return (v - padY) / scale; };
+
+    // Bounding box
+    result.bboxX = unlbX(dets[bestIdx * 5 + 0]);
+    result.bboxY = unlbY(dets[bestIdx * 5 + 1]);
+    result.bboxW = dets[bestIdx * 5 + 2] / scale;
+    result.bboxH = dets[bestIdx * 5 + 3] / scale;
+
+    // Keypoints
+    const float* kpBase = kps.data() + bestIdx * PoseLandmarkIdx::NUM * 3;
+    for (int i = 0; i < PoseLandmarkIdx::NUM; i++) {
+        result.keypoints[i * 3 + 0] = unlbX(kpBase[i * 3 + 0]);
+        result.keypoints[i * 3 + 1] = unlbY(kpBase[i * 3 + 1]);
+        result.keypoints[i * 3 + 2] = kpBase[i * 3 + 2];
     }
 }

@@ -82,7 +82,7 @@ int main(int argc, char** argv) {
     }
 
     FaceTracker faceTracker(modelDir);
-    PoseTracker poseTracker(modelDir + "/pose_landmarker.onnx");
+    PoseTracker poseTracker(modelDir + "/rtmo-s.onnx");
     HandTracker handTracker(modelDir + "/hand_landmarker.onnx");
     RigSolver rigSolver(model);
 
@@ -128,53 +128,27 @@ int main(int argc, char** argv) {
             FaceResult result;
             faceTracker.detect(frame, result);
 
+            // RTMO: single-stage full-frame pose detection (no detector needed)
             PoseResult pose;
-            // Crop body ROI from face detection for the pose landmarker
-            // (the model expects a cropped person, not a full frame)
-            if (result.detected) {
-                float fcx = (result.bboxX1 + result.bboxX2) * 0.5f;
-                float fcy = (result.bboxY1 + result.bboxY2) * 0.5f;
-                float fw = result.bboxX2 - result.bboxX1;
-                float fh = result.bboxY2 - result.bboxY1;
-                // Body ROI: wide enough for arms, tall enough for torso
-                int roiSize = (int)std::max(fw * 3.0f, fh * 4.5f);
-                int roiX = (int)(fcx - roiSize * 0.5f);
-                int roiY = (int)(fcy - roiSize * 0.15f);
-                Image bodyCrop = cropImage(frame, roiX, roiY, roiSize, roiSize);
-                poseTracker.detect(bodyCrop, pose);
-                pose.roiX = roiX;
-                pose.roiY = roiY;
-            }
+            poseTracker.detect(frame, pose);
 
+            // Hand tracking: crop ROIs from RTMO's accurate wrist positions
             HandResult handLeft, handRight;
-            // Crop hand ROI from projected world wrist positions
-            if (pose.detected && result.detected) {
-                // Project world landmarks to frame coords (same as PiP drawing)
-                float fcx = (result.bboxX1 + result.bboxX2) * 0.5f;
-                float fcy = (result.bboxY1 + result.bboxY2) * 0.5f;
-                float fw = result.bboxX2 - result.bboxX1;
-                float wnx = pose.wlX(0), wny = pose.wlY(0);
-                float wsx = (pose.wlX(11) + pose.wlX(12)) * 0.5f;
-                float wsy = (pose.wlY(11) + pose.wlY(12)) * 0.5f;
-                float wFaceH = std::sqrt((wnx-wsx)*(wnx-wsx) + (wny-wsy)*(wny-wsy));
-                float projScale = (wFaceH > 1e-5f) ? (fw / wFaceH) : 300.0f;
-                auto project = [&](int idx) {
-                    float dx = pose.wlX(idx) - wnx;
-                    float dy = pose.wlY(idx) - wny;
-                    return std::make_pair((int)(fcx + dx * projScale), (int)(fcy + dy * projScale));
-                };
+            if (pose.detected) {
+                float shoulderDist = std::abs(pose.kpX(PoseLandmarkIdx::L_SHOULDER) -
+                                              pose.kpX(PoseLandmarkIdx::R_SHOULDER));
+                int hs = (int)std::max(shoulderDist * 0.55f, 80.0f);
                 auto detectHand = [&](int wristIdx, HandResult& outResult) {
-                    auto [wx, wy] = project(wristIdx);
-                    int hs = (int)std::max(fw * 0.8f, 80.0f);
-                    int hrx = wx - hs/2, hry = wy - hs/2;
+                    if (pose.kpScore(wristIdx) < 0.3f) return;
+                    int wx = (int)pose.kpX(wristIdx);
+                    int wy = (int)pose.kpY(wristIdx);
+                    int hrx = wx - hs / 2, hry = wy - hs / 2;
                     HandResult h;
                     handTracker.detect(cropImage(frame, hrx, hry, hs, hs), h);
                     if (h.detected) { h.roiX = hrx; h.roiY = hry; outResult = h; }
                 };
-                if (pose.lmVis(PoseLandmarkIdx::L_WRIST) > 0.3f)
-                    detectHand(PoseLandmarkIdx::L_WRIST, handLeft);
-                if (pose.lmVis(PoseLandmarkIdx::R_WRIST) > 0.3f)
-                    detectHand(PoseLandmarkIdx::R_WRIST, handRight);
+                detectHand(PoseLandmarkIdx::L_WRIST, handLeft);
+                detectHand(PoseLandmarkIdx::R_WRIST, handRight);
             }
 
             Image annotated;
@@ -194,48 +168,26 @@ int main(int argc, char** argv) {
                             1, yellow);
                     }
                 }
-                if (pose.detected && result.detected) {
-                    // The pose model's IMAGE coordinates are unreliable without
-                    // its detector (compressed near canvas center). Project WORLD
-                    // landmarks to frame coords using the face bbox as reference.
-                    float fcx = (result.bboxX1 + result.bboxX2) * 0.5f;
-                    float fcy = (result.bboxY1 + result.bboxY2) * 0.5f;
-                    float fw = result.bboxX2 - result.bboxX1;
-                    // World nose → frame face center. Scale from world→frame.
-                    float wnx = pose.wlX(0), wny = pose.wlY(0);
-                    // World face size ≈ nose-to-shoulder distance
-                    float wsx = (pose.wlX(11) + pose.wlX(12)) * 0.5f;
-                    float wsy = (pose.wlY(11) + pose.wlY(12)) * 0.5f;
-                    float wFaceH = std::sqrt((wnx-wsx)*(wnx-wsx) + (wny-wsy)*(wny-wsy));
-                    float projScale = (wFaceH > 1e-5f) ? (fw / wFaceH) : 300.0f;
-                    auto toFrame = [&](int idx) {
-                        float dx = pose.wlX(idx) - wnx;
-                        float dy = pose.wlY(idx) - wny;
-                        return std::make_pair((int)(fcx + dx * projScale),
-                                              (int)(fcy + dy * projScale));
-                    };
+                if (pose.detected) {
+                    // RTMO keypoints are already in original frame pixel coords
                     uint8_t cyan[3] = {255, 255, 0};
                     static const int POSE_CONN[][2] = {
-                        {11,12},{11,13},{13,15},{12,14},{14,16},
-                        {15,17},{15,19},{15,21},{17,19},
-                        {16,18},{16,20},{16,22},{18,20},
-                        {11,23},{12,24},{23,24},
-                        {23,25},{25,27},{27,29},{27,31},{29,31},
-                        {24,26},{26,28},{28,30},{28,32},{30,32},
+                        {5,6},{5,7},{7,9},{6,8},{8,10},
+                        {5,11},{6,12},{11,12},
+                        {11,13},{13,15},{12,14},{14,16},
                     };
                     for (auto& c : POSE_CONN) {
-                        if (c[0] < 33 && c[1] < 33) {
-                            auto [x0, y0] = toFrame(c[0]);
-                            auto [x1, y1] = toFrame(c[1]);
-                            drawLine(annotated, x0, y0, x1, y1, cyan, 2);
+                        if (pose.kpScore(c[0]) > 0.3f && pose.kpScore(c[1]) > 0.3f) {
+                            drawLine(annotated,
+                                (int)pose.kpX(c[0]), (int)pose.kpY(c[0]),
+                                (int)pose.kpX(c[1]), (int)pose.kpY(c[1]),
+                                cyan, 2);
                         }
                     }
-                    for (int i = 0; i < 33; i++) {
-                        auto [px, py] = toFrame(i);
-                        bool upper = (i >= 11 && i <= 16);
-                        uint8_t dotColor[3] = {0, 0, 255};
-                        if (!upper) { dotColor[0] = 0; dotColor[1] = 180; dotColor[2] = 180; }
-                        drawCircleFilled(annotated, px, py, 3, dotColor);
+                    uint8_t dotColor[3] = {0, 0, 255};
+                    for (int i = 0; i < 17; i++) {
+                        if (pose.kpScore(i) > 0.3f)
+                            drawCircleFilled(annotated, (int)pose.kpX(i), (int)pose.kpY(i), 3, dotColor);
                     }
                 }
                 // Hand skeleton

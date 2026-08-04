@@ -152,8 +152,6 @@ glm::quat RigSolver::filterRot(int idx, const glm::quat& q, float dt) {
 }
 
 void RigSolver::calibratePose() {
-    torsoNeutral_ = torsoFilter_.lastFiltered();
-    spineYNeutral_ = spineYFilter_.lastFiltered();
     spineZNeutral_ = spineZFilter_.lastFiltered();
     handsCalibrated_ = true;
     poseCalibrated_ = true;
@@ -161,100 +159,68 @@ void RigSolver::calibratePose() {
 
 void RigSolver::updatePose(const PoseResult& pose, float dt) {
     if (!calibrated_ || !pose.detected) {
-        // Keep last valid pose (don't snap to bind/T-pose between detections)
+        return;  // keep last valid pose
+    }
+
+    auto has = [&](int idx) { return pose.kpScore(idx) > 0.3f; };
+    if (!has(PoseLandmarkIdx::L_SHOULDER) || !has(PoseLandmarkIdx::R_SHOULDER))
         return;
-    }
 
-    // World landmarks (metric, meters)
-    glm::vec3 ls = {pose.wlX(PoseLandmarkIdx::L_SHOULDER), pose.wlY(PoseLandmarkIdx::L_SHOULDER), pose.wlZ(PoseLandmarkIdx::L_SHOULDER)};
-    glm::vec3 rs = {pose.wlX(PoseLandmarkIdx::R_SHOULDER), pose.wlY(PoseLandmarkIdx::R_SHOULDER), pose.wlZ(PoseLandmarkIdx::R_SHOULDER)};
-    glm::vec3 le = {pose.wlX(PoseLandmarkIdx::L_ELBOW), pose.wlY(PoseLandmarkIdx::L_ELBOW), pose.wlZ(PoseLandmarkIdx::L_ELBOW)};
-    glm::vec3 re = {pose.wlX(PoseLandmarkIdx::R_ELBOW), pose.wlY(PoseLandmarkIdx::R_ELBOW), pose.wlZ(PoseLandmarkIdx::R_ELBOW)};
-    glm::vec3 lw = {pose.wlX(PoseLandmarkIdx::L_WRIST), pose.wlY(PoseLandmarkIdx::L_WRIST), pose.wlZ(PoseLandmarkIdx::L_WRIST)};
-    glm::vec3 rw = {pose.wlX(PoseLandmarkIdx::R_WRIST), pose.wlY(PoseLandmarkIdx::R_WRIST), pose.wlZ(PoseLandmarkIdx::R_WRIST)};
-    glm::vec3 lh = {pose.wlX(PoseLandmarkIdx::L_HIP), pose.wlY(PoseLandmarkIdx::L_HIP), pose.wlZ(PoseLandmarkIdx::L_HIP)};
-    glm::vec3 rh = {pose.wlX(PoseLandmarkIdx::R_HIP), pose.wlY(PoseLandmarkIdx::R_HIP), pose.wlZ(PoseLandmarkIdx::R_HIP)};
+    // 2D pixel coords → VRM direction vectors.
+    // Image Y is down, VRM Y is up → negate Y. Z=0 (no depth from 2D).
+    auto toVec = [&](int idx) -> glm::vec3 {
+        return {pose.kpX(idx), -pose.kpY(idx), 0.0f};
+    };
 
-    // Convert to VRM space: flip Z
-    ls *= AXIS_FLIP; rs *= AXIS_FLIP;
-    le *= AXIS_FLIP; re *= AXIS_FLIP;
-    lw *= AXIS_FLIP; rw *= AXIS_FLIP;
-    lh *= AXIS_FLIP; rh *= AXIS_FLIP;
+    glm::vec3 ls = toVec(PoseLandmarkIdx::L_SHOULDER);
+    glm::vec3 rs = toVec(PoseLandmarkIdx::R_SHOULDER);
+    glm::vec3 le = has(PoseLandmarkIdx::L_ELBOW) ? toVec(PoseLandmarkIdx::L_ELBOW) : ls;
+    glm::vec3 re = has(PoseLandmarkIdx::R_ELBOW) ? toVec(PoseLandmarkIdx::R_ELBOW) : rs;
+    glm::vec3 lw = has(PoseLandmarkIdx::L_WRIST) ? toVec(PoseLandmarkIdx::L_WRIST) : le;
+    glm::vec3 rw = has(PoseLandmarkIdx::R_WRIST) ? toVec(PoseLandmarkIdx::R_WRIST) : re;
 
-    // Arm direction vectors
-    glm::vec3 luDir = le - ls;  // left upper arm
-    glm::vec3 ruDir = re - rs;  // right upper arm
-    glm::vec3 llDir = lw - le;  // left lower arm
-    glm::vec3 rlDir = rw - re;  // right lower arm
+    // Upper arm rotations
+    glm::quat upperL = dirToRotation(REST_L, le - ls);
+    glm::quat upperR = dirToRotation(REST_R, re - rs);
 
-    // Upper arm rotations (world space)
-    glm::quat upperL_raw = dirToRotation(REST_L, luDir);
-    glm::quat upperR_raw = dirToRotation(REST_R, ruDir);
+    // Lower arm: world → local relative to upper arm
+    glm::quat lowerL_world = dirToRotation(REST_L, lw - le);
+    glm::quat lowerR_world = dirToRotation(REST_R, rw - re);
+    glm::quat lowerL_local = glm::inverse(upperL) * lowerL_world;
+    glm::quat lowerR_local = glm::inverse(upperR) * lowerR_world;
 
-    // Lower arm rotations: convert world → local relative to upper arm
-    glm::quat lowerL_world = dirToRotation(REST_L, llDir);
-    glm::quat lowerR_world = dirToRotation(REST_R, rlDir);
-    glm::quat lowerL_local_raw = glm::inverse(upperL_raw) * lowerL_world;
-    glm::quat lowerR_local_raw = glm::inverse(upperR_raw) * lowerR_world;
+    bodyPose_.leftUpperArm  = filterRot(0, upperL, dt);
+    bodyPose_.rightUpperArm = filterRot(2, upperR, dt);
+    bodyPose_.leftLowerArm  = filterRot(1, lowerL_local, dt);
+    bodyPose_.rightLowerArm = filterRot(3, lowerR_local, dt);
 
-    // Filter via rotation vectors
-    bodyPose_.leftUpperArm = filterRot(0, upperL_raw, dt);
-    bodyPose_.rightUpperArm = filterRot(2, upperR_raw, dt);
-    bodyPose_.leftLowerArm = filterRot(1, lowerL_local_raw, dt);
-    bodyPose_.rightLowerArm = filterRot(3, lowerR_local_raw, dt);
-
-    // Torso lean: shoulders forward of hips
-    glm::vec3 shoulderMid = (ls + rs) / 2.0f;
-    glm::vec3 hipMid = (lh + rh) / 2.0f;
-    glm::vec3 d = shoulderMid - hipMid;
-    float vert = std::sqrt(d.x * d.x + d.y * d.y);
-    float lean = 0.0f;
-    if (vert > 1e-5f) lean = std::atan2(-d.z, vert);
-    lean = torsoFilter_.filter(lean, dt);
-    if (poseCalibrated_) lean -= torsoNeutral_;
-    lean = -lean;
-
-    // Spine lateral bend + twist from shoulder line
-    glm::vec3 shoulderVec = ls - rs;  // right→left in VRM space
-    float horiz = std::sqrt(shoulderVec.x * shoulderVec.x + shoulderVec.z * shoulderVec.z);
-    float spineY = 0, spineZ = 0;
-    if (horiz > 1e-5f) {
+    // Spine lateral bend from shoulder line tilt
+    glm::vec3 shoulderVec = ls - rs;
+    float horiz = std::abs(shoulderVec.x);
+    float spineZ = 0.0f;
+    if (horiz > 1e-5f)
         spineZ = -std::atan2(shoulderVec.y, horiz);
-        spineY = std::atan2(-shoulderVec.z, horiz);
-    }
-    spineY = spineYFilter_.filter(spineY, dt);
     spineZ = spineZFilter_.filter(spineZ, dt);
-    if (poseCalibrated_) {
-        spineY -= spineYNeutral_;
-        spineZ -= spineZNeutral_;
-    }
+    if (poseCalibrated_) spineZ -= spineZNeutral_;
+    bodyPose_.spine = glm::angleAxis(spineZ, glm::vec3(0, 0, 1));
 
-    // Compose spine rotation: lean (X) + twist (Y) + lateral (Z)
-    glm::quat qLean = glm::angleAxis(lean, glm::vec3(1, 0, 0));
-    glm::quat qTwist = glm::angleAxis(spineY, glm::vec3(0, 1, 0));
-    glm::quat qLateral = glm::angleAxis(spineZ, glm::vec3(0, 0, 1));
-    bodyPose_.spine = qLean * qTwist * qLateral;
+    // Standing detection from lower body keypoint scores
+    if (has(PoseLandmarkIdx::L_HIP) && has(PoseLandmarkIdx::R_HIP)) {
+        float lowerVis = (pose.kpScore(PoseLandmarkIdx::L_KNEE) + pose.kpScore(PoseLandmarkIdx::R_KNEE) +
+                          pose.kpScore(PoseLandmarkIdx::L_ANKLE) + pose.kpScore(PoseLandmarkIdx::R_ANKLE)) / 4.0f;
+        bodyPose_.standing = lowerVis > 0.3f ? 1.0f : 0.0f;
 
-    // Standing detection via lower body visibility
-    float lowerVis = (pose.lmVis(PoseLandmarkIdx::L_KNEE) + pose.lmVis(PoseLandmarkIdx::R_KNEE) +
-                      pose.lmVis(PoseLandmarkIdx::L_ANKLE) + pose.lmVis(PoseLandmarkIdx::R_ANKLE)) / 4.0f;
-    bodyPose_.standing = lowerVis > 0.3f ? 1.0f : 0.0f;
-
-    // Body extent: how many torso-lengths of body are visible below the shoulders
-    float shoulderMidY = (ls.y + rs.y) / 2.0f;
-    float hipMidY = (lh.y + rh.y) / 2.0f;
-    float torsoUnit = std::abs(shoulderMidY - hipMidY);
-    if (torsoUnit > 1e-5f) {
-        float lowestY = shoulderMidY;
-        for (int idx : {PoseLandmarkIdx::L_HIP, PoseLandmarkIdx::R_HIP,
-                        PoseLandmarkIdx::L_KNEE, PoseLandmarkIdx::R_KNEE,
-                        PoseLandmarkIdx::L_ANKLE, PoseLandmarkIdx::R_ANKLE}) {
-            if (pose.lmVis(idx) > 0.3f)
-                lowestY = std::min(lowestY, pose.wlY(idx) * AXIS_FLIP.y);
+        float shoulderMidY = (ls.y + rs.y) * 0.5f;
+        float hipMidY = (toVec(PoseLandmarkIdx::L_HIP).y + toVec(PoseLandmarkIdx::R_HIP).y) * 0.5f;
+        float torsoUnit = std::abs(shoulderMidY - hipMidY);
+        if (torsoUnit > 1e-5f) {
+            float lowestY = shoulderMidY;
+            for (int idx : {PoseLandmarkIdx::L_KNEE, PoseLandmarkIdx::R_KNEE,
+                            PoseLandmarkIdx::L_ANKLE, PoseLandmarkIdx::R_ANKLE}) {
+                if (has(idx)) lowestY = std::min(lowestY, -pose.kpY(idx));
+            }
+            bodyPose_.bodyExtent = (shoulderMidY - lowestY) / torsoUnit;
         }
-        bodyPose_.bodyExtent = (shoulderMidY - lowestY) / torsoUnit;
-    } else {
-        bodyPose_.bodyExtent = 0.0f;
     }
 
     bodyPose_.valid = true;
