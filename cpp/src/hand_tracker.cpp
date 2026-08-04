@@ -21,6 +21,9 @@ void HandTracker::detect(const Image& bgr, HandResult& result) {
     const int SIZE = 224;
     float scale, padX, padY;
     Image canvas = letterbox(bgr, SIZE, scale, padX, padY);
+    result.lbScale = scale;
+    result.lbPadX = padX;
+    result.lbPadY = padY;
 
     std::vector<float> blob(SIZE * SIZE * 3);
     for (int y = 0; y < SIZE; y++) {

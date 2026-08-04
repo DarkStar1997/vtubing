@@ -22,6 +22,9 @@ void PoseTracker::detect(const Image& bgr, PoseResult& result) {
     const int SIZE = 256;
     float scale, padX, padY;
     Image canvas = letterbox(bgr, SIZE, scale, padX, padY);
+    result.lbScale = scale;
+    result.lbPadX = padX;
+    result.lbPadY = padY;
 
     // Preprocess: NHWC float32 [0,1], BGR→RGB
     // Input shape: [1, 256, 256, 3]

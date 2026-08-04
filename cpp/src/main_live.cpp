@@ -157,13 +157,67 @@ int main(int argc, char** argv) {
                     }
                 }
                 if (pose.detected) {
+                    // Un-project from letterbox-normalized coords to original frame pixels
+                    auto toFrame = [&](float nx, float ny) {
+                        int px = (int)((nx * 256.0f - pose.lbPadX) / pose.lbScale);
+                        int py = (int)((ny * 256.0f - pose.lbPadY) / pose.lbScale);
+                        return std::make_pair(px, py);
+                    };
                     uint8_t cyan[3] = {255, 255, 0};
+                    // Pose skeleton connections (BlazePose upper + lower body)
+                    static const int POSE_CONN[][2] = {
+                        {11,12},{11,13},{13,15},{12,14},{14,16},
+                        {15,17},{15,19},{15,21},{17,19},
+                        {16,18},{16,20},{16,22},{18,20},
+                        {11,23},{12,24},{23,24},
+                        {23,25},{25,27},{27,29},{27,31},{29,31},
+                        {24,26},{26,28},{28,30},{28,32},{30,32},
+                    };
+                    for (auto& c : POSE_CONN) {
+                        if (c[0] < 33 && c[1] < 33) {
+                            auto [x0, y0] = toFrame(pose.lmX(c[0]), pose.lmY(c[0]));
+                            auto [x1, y1] = toFrame(pose.lmX(c[1]), pose.lmY(c[1]));
+                            drawLine(annotated, x0, y0, x1, y1, cyan, 2);
+                        }
+                    }
                     for (int i = 0; i < 33; i++) {
-                        int px = (int)(pose.lmX(i) * frame.width);
-                        int py = (int)(pose.lmY(i) * frame.height);
-                        drawCircleFilled(annotated, px, py, 2, cyan);
+                        auto [px, py] = toFrame(pose.lmX(i), pose.lmY(i));
+                        bool upper = (i >= 11 && i <= 16);
+                        uint8_t dotColor[3] = {0, 0, 255};  // red BGR for upper body joints
+                        if (!upper) { dotColor[0] = 0; dotColor[1] = 180; dotColor[2] = 180; }
+                        drawCircleFilled(annotated, px, py, 3, dotColor);
                     }
                 }
+                // Hand skeleton
+                auto drawHandSkeleton = [&](const HandResult& hr) {
+                    if (!hr.detected) return;
+                    auto toFrame = [&](float nx, float ny) {
+                        int px = (int)((nx * 224.0f - hr.lbPadX) / hr.lbScale);
+                        int py = (int)((ny * 224.0f - hr.lbPadY) / hr.lbScale);
+                        return std::make_pair(px, py);
+                    };
+                    uint8_t orange[3] = {0, 200, 255};   // BGR orange lines
+                    uint8_t dotBlue[3] = {255, 100, 0};   // BGR blue dots
+                    static const int HAND_CONN[][2] = {
+                        {0,1},{1,2},{2,3},{3,4},
+                        {0,5},{5,6},{6,7},{7,8},
+                        {5,9},{9,10},{10,11},{11,12},
+                        {9,13},{13,14},{14,15},{15,16},
+                        {13,17},{17,18},{18,19},{19,20},
+                        {0,17},
+                    };
+                    for (auto& c : HAND_CONN) {
+                        auto [x0, y0] = toFrame(hr.lmX(c[0]), hr.lmY(c[0]));
+                        auto [x1, y1] = toFrame(hr.lmX(c[1]), hr.lmY(c[1]));
+                        drawLine(annotated, x0, y0, x1, y1, orange, 2);
+                    }
+                    for (int i = 0; i < 21; i++) {
+                        auto [px, py] = toFrame(hr.lmX(i), hr.lmY(i));
+                        drawCircleFilled(annotated, px, py, 3, dotBlue);
+                    }
+                };
+                drawHandSkeleton(handLeft);
+                drawHandSkeleton(handRight);
             }
 
             {

@@ -120,6 +120,29 @@ inline void drawCircleFilled(Image& img, int cx, int cy, int radius, const uint8
     }
 }
 
+inline void drawLine(Image& img, int x0, int y0, int x1, int y1, const uint8_t color[3], int thickness = 1) {
+    int dx = std::abs(x1 - x0), dy = std::abs(y1 - y0);
+    int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+    int err = dx - dy;
+    int w = img.width, h = img.height;
+    auto setPx = [&](int x, int y) {
+        if (x < 0 || x >= w || y < 0 || y >= h) return;
+        uint8_t* p = img.ptr(y, x);
+        for (int c = 0; c < img.channels && c < 3; c++) p[c] = color[c];
+    };
+    for (;;) {
+        for (int ty = 0; ty < thickness; ty++) {
+            for (int tx = 0; tx < thickness; tx++) {
+                setPx(x0 + tx - thickness / 2, y0 + ty - thickness / 2);
+            }
+        }
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; x0 += sx; }
+        if (e2 < dx)  { err += dx; y0 += sy; }
+    }
+}
+
 // Bilinear resize. Matches cv::resize(INTER_LINEAR) closely enough for the PiP overlay.
 inline Image resizeBilinear(const Image& src, int dstW, int dstH) {
     int ch = src.channels;

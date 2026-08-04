@@ -25,12 +25,15 @@ struct PoseResult {
     bool detected = false;
     float presence = 0.0f;  // person presence [0,1]
 
-    // 39 landmarks, each: x, y, z, visibility (image-space, normalized [0,1])
+    // 39 landmarks, each: x, y, z, visibility (image-space, normalized [0,1] relative to letterbox canvas)
     // Only first 33 are body landmarks (BlazePose), 33-38 are auxiliary
     std::array<float, 39 * 4> landmarks{};
 
     // 39 world landmarks, each: x, y, z (metric, meters)
     std::array<float, 39 * 3> worldLandmarks{};
+
+    // Letterbox params for un-projecting landmarks to original frame coords
+    float lbScale = 1.0f, lbPadX = 0.0f, lbPadY = 0.0f;
 
     // Convenience accessors
     float lmX(int i) const { return landmarks[i * 4 + 0]; }

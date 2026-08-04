@@ -18,11 +18,14 @@ struct HandResult {
     bool detected = false;
     float handedness = 0.0f;  // sigmoid score (0=right, 1=left typically)
 
-    // 21 landmarks, each x,y,z (image-space, normalized [0,1])
+    // 21 landmarks, each x,y,z (image-space, normalized [0,1] relative to letterbox canvas)
     std::array<float, 21 * 3> landmarks{};
 
     // 21 world landmarks, each x,y,z (metric, meters)
     std::array<float, 21 * 3> worldLandmarks{};
+
+    // Letterbox params for un-projecting landmarks to original frame coords
+    float lbScale = 1.0f, lbPadX = 0.0f, lbPadY = 0.0f;
 
     float lmX(int i) const { return landmarks[i * 3 + 0]; }
     float lmY(int i) const { return landmarks[i * 3 + 1]; }
