@@ -28,6 +28,11 @@ struct HandResult {
     float lbScale = 1.0f, lbPadX = 0.0f, lbPadY = 0.0f;
     int roiX = 0, roiY = 0;
 
+    // Anchor position (e.g. pose tracker's wrist keypoint) in original frame
+    // pixel coords. Used to lock the hand wrist (lm 0) to the arm endpoint so
+    // the hand never appears detached from the wrist.
+    float anchorX = -1.0f, anchorY = -1.0f;
+
     float lmX(int i) const { return landmarks[i * 3 + 0]; }
     float lmY(int i) const { return landmarks[i * 3 + 1]; }
     float lmZ(int i) const { return landmarks[i * 3 + 2]; }

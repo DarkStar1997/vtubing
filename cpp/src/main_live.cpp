@@ -153,7 +153,11 @@ int main(int argc, char** argv) {
                     int hrx = wx - hs / 2, hry = wy - hs / 2;
                     HandResult h;
                     handTracker.detect(cropImage(frame, hrx, hry, hs, hs), h);
-                    if (h.detected) { h.roiX = hrx; h.roiY = hry; outResult = h; }
+                    if (h.detected) {
+                        h.roiX = hrx; h.roiY = hry;
+                        h.anchorX = (float)wx; h.anchorY = (float)wy;
+                        outResult = h;
+                    }
                 };
                 detectHand(PoseLandmarkIdx::L_WRIST, PoseLandmarkIdx::L_ELBOW, handLeft);
                 detectHand(PoseLandmarkIdx::R_WRIST, PoseLandmarkIdx::R_ELBOW, handRight);
@@ -208,6 +212,19 @@ int main(int argc, char** argv) {
                         int py = (int)((py224 - hr.lbPadY) / hr.lbScale) + hr.roiY;
                         return std::make_pair(px, py);
                     };
+                    // Lock the hand wrist (lm 0) to the pose-tracker wrist so
+                    // the hand never appears detached/elongated from the arm.
+                    // Offset = anchor - lm0 (applied to all landmarks).
+                    auto [lm0x, lm0y] = toFrame(hr.lmX(0), hr.lmY(0));
+                    int offX = 0, offY = 0;
+                    if (hr.anchorX >= 0.0f) {
+                        offX = (int)hr.anchorX - lm0x;
+                        offY = (int)hr.anchorY - lm0y;
+                    }
+                    auto toFrameAnchored = [&](float px224, float py224) {
+                        auto [x, y] = toFrame(px224, py224);
+                        return std::make_pair(x + offX, y + offY);
+                    };
                     uint8_t orange[3] = {0, 200, 255};   // BGR orange lines
                     uint8_t dotBlue[3] = {255, 100, 0};   // BGR blue dots
                     static const int HAND_CONN[][2] = {
@@ -219,12 +236,12 @@ int main(int argc, char** argv) {
                         {0,17},
                     };
                     for (auto& c : HAND_CONN) {
-                        auto [x0, y0] = toFrame(hr.lmX(c[0]), hr.lmY(c[0]));
-                        auto [x1, y1] = toFrame(hr.lmX(c[1]), hr.lmY(c[1]));
+                        auto [x0, y0] = toFrameAnchored(hr.lmX(c[0]), hr.lmY(c[0]));
+                        auto [x1, y1] = toFrameAnchored(hr.lmX(c[1]), hr.lmY(c[1]));
                         drawLine(annotated, x0, y0, x1, y1, orange, 2);
                     }
                     for (int i = 0; i < 21; i++) {
-                        auto [px, py] = toFrame(hr.lmX(i), hr.lmY(i));
+                        auto [px, py] = toFrameAnchored(hr.lmX(i), hr.lmY(i));
                         drawCircleFilled(annotated, px, py, 3, dotBlue);
                     }
                 };
