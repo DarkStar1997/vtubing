@@ -91,9 +91,12 @@ int main(int argc, char** argv) {
 
     bool running = true, showPiP = true, calibrating = false;
     SDL_Event event;
-    cv::Mat lastAnnotated;  // cached PiP frame, reused between webcam updates
+    Image lastAnnotated;  // cached PiP frame, reused between webcam updates
+    Image pipImg;         // pre-resized PiP (updated at webcam rate, not render rate)
+    const int pipW = 320, pipH = 240;
 
     auto lastTime = std::chrono::steady_clock::now();
+    auto lastTrackTime = lastTime;  // for correct dt between face-tracking updates
     int frameCount = 0;
     int detectCount = 0;
     auto statTime = lastTime;
@@ -122,7 +125,7 @@ int main(int argc, char** argv) {
 
         // Get latest webcam frame
         bool isNew = false;
-        cv::Mat frame = webcam.getLatest(isNew);
+        Image frame = webcam.getLatest(isNew);
 
         FaceResult faceResult;
 
@@ -130,7 +133,12 @@ int main(int argc, char** argv) {
             // Run face tracking
             faceTracker.detect(frame, faceResult);
 
-            if (showPiP) frame.copyTo(lastAnnotated);
+            // dt between consecutive tracking updates (not render frames)
+            float trackDt = std::chrono::duration<float>(now - lastTrackTime).count();
+            lastTrackTime = now;
+            if (trackDt > 0.1f) trackDt = 0.1f;
+
+            if (showPiP) lastAnnotated = frame;
 
             if (faceResult.detected) {
                 detectCount++;
@@ -142,30 +150,39 @@ int main(int argc, char** argv) {
                     }
                 }
 
-                rigSolver.update(faceResult, dt);
+                rigSolver.update(faceResult, trackDt);
 
                 // Draw annotations
                 if (showPiP && !lastAnnotated.empty()) {
                     // Bounding box
-                    cv::rectangle(lastAnnotated,
-                        cv::Point((int)faceResult.bboxX1, (int)faceResult.bboxY1),
-                        cv::Point((int)faceResult.bboxX2, (int)faceResult.bboxY2),
-                        cv::Scalar(0, 255, 0), 2);
+                    uint8_t green[3] = {0, 255, 0};
+                    uint8_t yellow[3] = {0, 255, 255};
+                    drawRect(lastAnnotated,
+                        (int)faceResult.bboxX1, (int)faceResult.bboxY1,
+                        (int)faceResult.bboxX2, (int)faceResult.bboxY2,
+                        green, 2);
                     // Some landmarks
                     for (int i = 0; i < 478; i += 10) {
-                        cv::circle(lastAnnotated,
-                            cv::Point((int)faceResult.landmarks[i*3], (int)faceResult.landmarks[i*3+1]),
-                            1, cv::Scalar(0, 255, 255), -1);
+                        drawCircleFilled(lastAnnotated,
+                            (int)faceResult.landmarks[i*3],
+                            (int)faceResult.landmarks[i*3+1],
+                            1, yellow);
                     }
                 }
             } else {
-                rigSolver.update(faceResult, dt);
+                rigSolver.update(faceResult, trackDt);
+            }
+            // Resize PiP once per new webcam frame (~30fps), not per render frame
+            if (showPiP && !lastAnnotated.empty()) {
+                pipImg = resizeBilinear(lastAnnotated, pipW, pipH);
             }
         }
 
-        // Apply head rotation to joint matrices
-        jointMatrices = bindJointMatrices;
+        // Apply head rotation to joint matrices.
+        // Only recompute on detection frames; between detections, persist the
+        // last computed pose to avoid snapping back to bind pose (stutter).
         if (faceResult.detected) {
+            jointMatrices = bindJointMatrices;
             glm::quat headRot = rigSolver.headRotation();
             if (headRot != glm::quat(1, 0, 0, 0)) {
                 // Modify head node world matrix and propagate to children
@@ -218,20 +235,17 @@ int main(int argc, char** argv) {
         }
 
         // PiP overlay
-        if (showPiP && !lastAnnotated.empty()) {
-            int pipW = 320, pipH = 240;
-            cv::Mat pipImg;
-            cv::resize(lastAnnotated, pipImg, cv::Size(pipW, pipH));
+        if (showPiP && !pipImg.empty()) {
             int pipX = fbWidth - pipW - 10;
             int pipY = fbHeight - pipH - 10;
             for (int py = 0; py < pipH; py++) {
                 for (int px = 0; px < pipW; px++) {
-                    auto* src = pipImg.ptr<cv::Vec3b>(py, px);
+                    const uint8_t* src = pipImg.ptr(py, px);
                     int di = ((pipY + py) * fbWidth + (pipX + px)) * 4;
                     bgra[di+0] = 255;        // A
-                    bgra[di+1] = (*src)[2];  // R (from BGR)
-                    bgra[di+2] = (*src)[1];  // G
-                    bgra[di+3] = (*src)[0];  // B
+                    bgra[di+1] = src[2];     // R (from BGR)
+                    bgra[di+2] = src[1];     // G
+                    bgra[di+3] = src[0];     // B
                 }
             }
         }

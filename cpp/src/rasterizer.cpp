@@ -95,6 +95,12 @@ std::vector<ProcessedMesh> processVertices(
         const auto& mesh = model.meshes[mi];
         result[mi].prims.resize(mesh.primitives.size());
 
+        int weightBase = 0;
+        for (size_t mj = 0; mj < mi; mj++) {
+            if (!model.meshes[mj].primitives.empty())
+                weightBase += model.meshes[mj].primitives[0].morphCount;
+        }
+
         for (size_t pi = 0; pi < mesh.primitives.size(); pi++) {
             const auto& prim = mesh.primitives[pi];
             int vc = prim.vertexCount();
@@ -109,27 +115,24 @@ std::vector<ProcessedMesh> processVertices(
             pp.worldNY.resize(vc);
             pp.worldNZ.resize(vc);
 
+            // Precompute active morph targets
+            std::vector<std::pair<const float*, float>> activeMorphs;
+            if (prim.morphCount > 0) {
+                for (int t = 0; t < prim.morphCount; t++) {
+                    float w = morphWeights[weightBase + t];
+                    if (w > 0.0f)
+                        activeMorphs.push_back({&prim.morphDeltas[(size_t)t * vc * 3], w});
+                }
+            }
+
             for (int v = 0; v < vc; v++) {
                 // --- 1. Morph targets ---
                 glm::vec3 pos(prim.positions[v * 3], prim.positions[v * 3 + 1], prim.positions[v * 3 + 2]);
-                if (prim.morphCount > 0) {
-                    int weightBase = 0; // For now, we pass weights for mesh0 only
-                    // Find the correct weight offset: sum of all prior meshes' morph counts
-                    for (size_t mj = 0; mj < mi; mj++) {
-                        if (!model.meshes[mj].primitives.empty())
-                            weightBase += model.meshes[mj].primitives[0].morphCount;
-                    }
-                    for (int t = 0; t < prim.morphCount; t++) {
-                        float w = morphWeights[weightBase + t];
-                        if (w > 0.0f) {
-                            float dx = prim.morphDeltas[(t * vc + v) * 3 + 0];
-                            float dy = prim.morphDeltas[(t * vc + v) * 3 + 1];
-                            float dz = prim.morphDeltas[(t * vc + v) * 3 + 2];
-                            pos.x += dx * w;
-                            pos.y += dy * w;
-                            pos.z += dz * w;
-                        }
-                    }
+                for (const auto& [deltas, w] : activeMorphs) {
+                    const float* dp = &deltas[v * 3];
+                    pos.x += dp[0] * w;
+                    pos.y += dp[1] * w;
+                    pos.z += dp[2] * w;
                 }
 
                 // --- 2. Skinning (4-bone LBS) ---
@@ -239,10 +242,12 @@ std::vector<ProcessedMesh> processVerticesParallel(
     std::vector<ProcessedMesh> result(model.meshes.size());
 
     // --- Phase 1: Pre-allocate + build flat arrays for cache-friendly access ---
+    struct ActiveMorph { const float* deltas; float weight; };
     struct PrimInfo {
         const MeshPrimitive* prim;
         ProcessedPrim* pp;
         int weightBase;
+        std::vector<ActiveMorph> activeMorphs;
     };
     std::vector<PrimInfo> primsFlat;
 
@@ -267,7 +272,20 @@ std::vector<ProcessedMesh> processVerticesParallel(
             pp.worldNX.resize(vc);
             pp.worldNY.resize(vc);
             pp.worldNZ.resize(vc);
-            primsFlat.push_back({&prim, &pp, weightBase});
+
+            PrimInfo info;
+            info.prim = &prim;
+            info.pp = &pp;
+            info.weightBase = weightBase;
+            // Precompute active morph targets (avoid iterating all 122 per vertex)
+            if (prim.morphCount > 0) {
+                for (int t = 0; t < prim.morphCount; t++) {
+                    float w = morphWeights[weightBase + t];
+                    if (w > 0.0f)
+                        info.activeMorphs.push_back({&prim.morphDeltas[(size_t)t * vc * 3], w});
+                }
+            }
+            primsFlat.push_back(std::move(info));
         }
     }
 
@@ -278,19 +296,13 @@ std::vector<ProcessedMesh> processVerticesParallel(
     auto processPrimVertices = [&](const PrimInfo& info, int v) {
         const MeshPrimitive& prim = *info.prim;
         ProcessedPrim& pp = *info.pp;
-        int vc = prim.vertexCount();
 
         glm::vec3 pos(prim.positions[v * 3], prim.positions[v * 3 + 1], prim.positions[v * 3 + 2]);
-        if (prim.morphCount > 0) {
-            for (int t = 0; t < prim.morphCount; t++) {
-                float w = morphWeights[info.weightBase + t];
-                if (w > 0.0f) {
-                    const float* dp = &prim.morphDeltas[(t * vc + v) * 3];
-                    pos.x += dp[0] * w;
-                    pos.y += dp[1] * w;
-                    pos.z += dp[2] * w;
-                }
-            }
+        for (const auto& m : info.activeMorphs) {
+            const float* dp = &m.deltas[v * 3];
+            pos.x += dp[0] * m.weight;
+            pos.y += dp[1] * m.weight;
+            pos.z += dp[2] * m.weight;
         }
 
         const uint16_t* j = &prim.joints[v * 4];

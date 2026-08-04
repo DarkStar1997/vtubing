@@ -1,5 +1,6 @@
 #pragma once
-#include <opencv2/opencv.hpp>
+#include "image.h"
+#include <SDL3/SDL.h>
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -13,14 +14,14 @@ public:
     void stop();
 
     // Returns latest frame (BGR). isNew is true only on first call after a fresh capture.
-    cv::Mat getLatest(bool& isNew);
+    Image getLatest(bool& isNew);
 
 private:
     int index_, width_, height_, fps_;
-    cv::VideoCapture cap_;
+    SDL_Camera* camera_ = nullptr;
     std::thread thread_;
     std::mutex mutex_;
-    cv::Mat latestFrame_;
+    Image latestFrame_;
     bool isNew_ = false;
     std::atomic<bool> running_{false};
 

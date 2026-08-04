@@ -43,9 +43,6 @@ file(DOWNLOAD
     ${THIRD_PARTY_DIR}/stb_image_write.h
     STATUS stbw_status)
 
-# --- OpenCV (system) ---
-find_package(OpenCV REQUIRED)
-
 # --- ONNX Runtime (pre-built) ---
 file(GLOB ORT_DIR "${THIRD_PARTY_DIR}/onnxruntime-linux-x64-*")
 if(NOT ORT_DIR)
@@ -95,7 +92,6 @@ target_include_directories(vtuber_live PRIVATE
 
 target_link_libraries(vtuber_live PRIVATE
     SDL3::SDL3 glm::glm
-    ${OpenCV_LIBS}
     onnxruntime)
 
 target_link_directories(vtuber_live PRIVATE ${ORT_DIR}/lib)
@@ -126,7 +122,6 @@ target_include_directories(test_tracker PRIVATE
 
 target_link_libraries(test_tracker PRIVATE
     glm::glm
-    ${OpenCV_LIBS}
     onnxruntime)
 
 target_link_directories(test_tracker PRIVATE ${ORT_DIR}/lib)

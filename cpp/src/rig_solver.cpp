@@ -110,8 +110,9 @@ void RigSolver::calibrate(const FaceResult& face) {
 
 void RigSolver::update(const FaceResult& face, float dt) {
     if (!calibrated_ || !face.detected) {
-        // Decay to zero
-        for (auto& w : morphWeights_) w *= 0.9f;
+        // Gentle dt-based decay toward neutral (0.2s time constant)
+        float decay = std::exp(-dt / 0.2f);
+        for (auto& w : morphWeights_) w *= decay;
         return;
     }
 

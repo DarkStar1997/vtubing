@@ -1,8 +1,6 @@
 #pragma once
 #include "onnx_session.h"
-#include <opencv2/opencv.hpp>
-#include <opencv2/imgproc.hpp>
-#include <opencv2/geometry/2d.hpp>
+#include "image.h"
 #include <array>
 #include <cmath>
 
@@ -21,8 +19,8 @@ class FaceTracker {
 public:
     FaceTracker(const std::string& modelDir);
 
-    // Process a BGR frame and fill result. imgW/imgH = frame dimensions.
-    void detect(const cv::Mat& bgr, FaceResult& result);
+    // Process a BGR frame and fill result.
+    void detect(const Image& bgr, FaceResult& result);
 
 private:
     std::unique_ptr<OnnxSession> detector_;
@@ -43,14 +41,14 @@ private:
         469,470,471,472,473,474,475,476,477};
 
     void generateAnchors();
-    cv::Mat letterbox(const cv::Mat& src, int size, float& scale, float& padX, float& padY);
+    Image letterbox(const Image& src, int size, float& scale, float& padX, float& padY);
 
-    // BlazeFace detection: returns (x1,y1,x2,y2) bbox + 6 keypoints (each x,y) in image coords
+    // BlazeFace detection: returns bbox + 6 keypoints (each x,y) in image coords
     struct Detection {
         float score;
         float cx, cy, w, h;
         float kp[6][2];  // 6 keypoints
     };
-    std::vector<Detection> runDetector(const cv::Mat& bgr, int imgW, int imgH);
+    std::vector<Detection> runDetector(const Image& bgr, int imgW, int imgH);
     std::vector<Detection> weightedNms(std::vector<Detection>& dets);
 };

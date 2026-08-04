@@ -1,9 +1,13 @@
 #include "face_tracker.h"
 #include "vrm_loader.h"
 #include "rig_solver.h"
-#include <opencv2/opencv.hpp>
+#include "image.h"
+#include <stb_image.h>   // declarations only (impl compiled in vrm_loader.cpp)
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include <stb_image_write.h>
 #include <cstdio>
 #include <cmath>
+#include <vector>
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -13,12 +17,21 @@ int main(int argc, char** argv) {
     std::string imagePath = argv[1];
     std::string modelDir = argc > 2 ? argv[2] : "../../assets/models";
 
-    cv::Mat img = cv::imread(imagePath);
-    if (img.empty()) {
+    // Load image (stb returns RGB); convert to BGR for the pipeline.
+    int iw = 0, ih = 0, ic = 0;
+    stbi_uc* pixels = stbi_load(imagePath.c_str(), &iw, &ih, &ic, 3);
+    if (!pixels) {
         fprintf(stderr, "Failed to load: %s\n", imagePath.c_str());
         return 1;
     }
-    fprintf(stderr, "[test] Image: %dx%d\n", img.cols, img.rows);
+    Image img(iw, ih, 3);
+    for (int i = 0; i < iw * ih; i++) {
+        img.data[i*3+0] = pixels[i*3+2];  // B
+        img.data[i*3+1] = pixels[i*3+1];  // G
+        img.data[i*3+2] = pixels[i*3+0];  // R
+    }
+    stbi_image_free(pixels);
+    fprintf(stderr, "[test] Image: %dx%d\n", img.width, img.height);
 
     FaceTracker tracker(modelDir);
     fprintf(stderr, "[test] Models loaded.\n");
@@ -29,8 +42,14 @@ int main(int argc, char** argv) {
     if (!result.detected) {
         fprintf(stderr, "[test] No face detected!\n");
 
-        // Save letterboxed detection input for debugging
-        cv::imwrite("/tmp/debug_input.jpg", img);
+        // Save input for debugging (convert BGR→RGB for stb)
+        std::vector<uint8_t> rgb(img.width * img.height * 3);
+        for (int i = 0; i < img.width * img.height; i++) {
+            rgb[i*3+0] = img.data[i*3+2];
+            rgb[i*3+1] = img.data[i*3+1];
+            rgb[i*3+2] = img.data[i*3+0];
+        }
+        stbi_write_jpg("/tmp/debug_input.jpg", img.width, img.height, 3, rgb.data(), 90);
         fprintf(stderr, "[test] Saved input to /tmp/debug_input.jpg\n");
         return 1;
     }
@@ -68,22 +87,23 @@ int main(int argc, char** argv) {
             fprintf(stderr, "    [%2d] %-20s = %.3f\n", i, bsNames[i], result.blendshapes[i]);
     }
 
-    // Draw annotated output
-    cv::Mat annotated;
-    cv::cvtColor(img, annotated, cv::COLOR_BGR2RGB);
-    cv::cvtColor(annotated, annotated, cv::COLOR_RGB2BGR);
+    // Draw annotated output (work on a copy of the input)
+    Image annotated = img;
+    uint8_t green[3] = {0, 255, 0};
+    uint8_t yellow[3] = {0, 255, 255};
 
     // Draw bbox
-    cv::rectangle(annotated,
-        cv::Point((int)result.bboxX1, (int)result.bboxY1),
-        cv::Point((int)result.bboxX2, (int)result.bboxY2),
-        cv::Scalar(0, 255, 0), 2);
+    drawRect(annotated,
+        (int)result.bboxX1, (int)result.bboxY1,
+        (int)result.bboxX2, (int)result.bboxY2,
+        green, 2);
 
     // Draw all 478 landmarks
     for (int i = 0; i < 478; i++) {
-        cv::circle(annotated,
-            cv::Point((int)result.landmarks[i*3], (int)result.landmarks[i*3+1]),
-            1, cv::Scalar(0, 255, 255), -1);
+        drawCircleFilled(annotated,
+            (int)result.landmarks[i*3],
+            (int)result.landmarks[i*3+1],
+            1, yellow);
     }
 
     // Test VRM mapping
@@ -100,8 +120,14 @@ int main(int argc, char** argv) {
             fprintf(stderr, "    morph[%3zu] = %.3f\n", i, mw[i]);
     }
 
-    // Save
-    cv::imwrite("/tmp/tracker_output.jpg", annotated);
+    // Save (convert BGR→RGB for stb)
+    std::vector<uint8_t> rgb(annotated.width * annotated.height * 3);
+    for (int i = 0; i < annotated.width * annotated.height; i++) {
+        rgb[i*3+0] = annotated.data[i*3+2];
+        rgb[i*3+1] = annotated.data[i*3+1];
+        rgb[i*3+2] = annotated.data[i*3+0];
+    }
+    stbi_write_jpg("/tmp/tracker_output.jpg", annotated.width, annotated.height, 3, rgb.data(), 90);
     fprintf(stderr, "\n[test] Saved annotated output to /tmp/tracker_output.jpg\n");
 
     return 0;

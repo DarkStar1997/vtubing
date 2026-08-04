@@ -34,30 +34,27 @@ void FaceTracker::generateAnchors() {
     }
 }
 
-cv::Mat FaceTracker::letterbox(const cv::Mat& src, int size, float& scale, float& padX, float& padY) {
-    int h = src.rows, w = src.cols;
+Image FaceTracker::letterbox(const Image& src, int size, float& scale, float& padX, float& padY) {
+    int h = src.height, w = src.width;
     scale = (float)size / std::max(h, w);
     padX = (size - w * scale) / 2.0f;
     padY = (size - h * scale) / 2.0f;
-    float mdata[6] = {scale, 0, padX, 0, scale, padY};
-    cv::Mat m(2, 3, CV_32F, mdata);
-    cv::Mat out;
-    cv::warpAffine(src, out, m, cv::Size(size, size));
-    return out;
+    float M[6] = {scale, 0, padX, 0, scale, padY};
+    return warpAffine(src, M, size, size);
 }
 
-std::vector<FaceTracker::Detection> FaceTracker::runDetector(const cv::Mat& bgr, int imgW, int imgH) {
+std::vector<FaceTracker::Detection> FaceTracker::runDetector(const Image& bgr, int imgW, int imgH) {
     float scale, padX, padY;
-    cv::Mat canvas = letterbox(bgr, 128, scale, padX, padY);
+    Image canvas = letterbox(bgr, 128, scale, padX, padY);
 
     // Preprocess: BGR→RGB, normalize [-1,1], transpose CHW
     std::vector<float> blob(3 * 128 * 128);
     for (int y = 0; y < 128; y++) {
         for (int x = 0; x < 128; x++) {
-            auto* px = canvas.ptr<cv::Vec3b>(y, x);
-            blob[0 * 128 * 128 + y * 128 + x] = ((*px)[2] - 127.5f) / 127.5f; // R
-            blob[1 * 128 * 128 + y * 128 + x] = ((*px)[1] - 127.5f) / 127.5f; // G
-            blob[2 * 128 * 128 + y * 128 + x] = ((*px)[0] - 127.5f) / 127.5f; // B
+            const uint8_t* px = canvas.ptr(y, x);
+            blob[0 * 128 * 128 + y * 128 + x] = (px[2] - 127.5f) / 127.5f; // R
+            blob[1 * 128 * 128 + y * 128 + x] = (px[1] - 127.5f) / 127.5f; // G
+            blob[2 * 128 * 128 + y * 128 + x] = (px[0] - 127.5f) / 127.5f; // B
         }
     }
 
@@ -143,9 +140,9 @@ std::vector<FaceTracker::Detection> FaceTracker::weightedNms(std::vector<Detecti
     return output;
 }
 
-void FaceTracker::detect(const cv::Mat& bgr, FaceResult& result) {
+void FaceTracker::detect(const Image& bgr, FaceResult& result) {
     result.detected = false;
-    int imgW = bgr.cols, imgH = bgr.rows;
+    int imgW = bgr.width, imgH = bgr.height;
 
     // 1. Run BlazeFace detector
     auto dets = runDetector(bgr, imgW, imgH);
@@ -157,7 +154,7 @@ void FaceTracker::detect(const cv::Mat& bgr, FaceResult& result) {
     // Un-letterbox detection from 128px normalized to full image coords
     float scale, padX, padY;
     {
-        int h = bgr.rows, w = bgr.cols;
+        int h = bgr.height, w = bgr.width;
         scale = 128.0f / std::max(h, w);
         padX = (128 - w * scale) / 2.0f;
         padY = (128 - h * scale) / 2.0f;
@@ -190,26 +187,25 @@ void FaceTracker::detect(const cv::Mat& bgr, FaceResult& result) {
 
     // 3. Warp ROI to 256×256
     int modelSize = 256;
-    cv::Mat rotM = cv::getRotationMatrix2D(cv::Point2f(fullCx, fullCy), angle,
-                                            (double)modelSize / fullSide);
-    rotM.at<double>(0, 2) += (double)modelSize / 2.0 - fullCx;
-    rotM.at<double>(1, 2) += (double)modelSize / 2.0 - fullCy;
+    float rotM[6];
+    getRotationMatrix2D(fullCx, fullCy, angle, (float)modelSize / fullSide, rotM);
+    rotM[2] += (float)modelSize / 2.0f - fullCx;
+    rotM[5] += (float)modelSize / 2.0f - fullCy;
 
-    cv::Mat crop;
-    cv::warpAffine(bgr, crop, rotM, cv::Size(modelSize, modelSize));
+    Image crop = warpAffine(bgr, rotM, modelSize, modelSize);
 
     // Inverse affine for landmark un-projection
-    cv::Mat invM(2, 3, CV_64F);
-    cv::invertAffineTransform(rotM, invM);
+    float invM[6];
+    invertAffine(rotM, invM);
 
     // 4. Preprocess crop: BGR→RGB, normalize [0,1], transpose CHW
     std::vector<float> meshBlob(3 * modelSize * modelSize);
     for (int y = 0; y < modelSize; y++) {
         for (int x = 0; x < modelSize; x++) {
-            auto* px = crop.ptr<cv::Vec3b>(y, x);
-            meshBlob[0 * modelSize * modelSize + y * modelSize + x] = (*px)[2] / 255.0f; // R
-            meshBlob[1 * modelSize * modelSize + y * modelSize + x] = (*px)[1] / 255.0f; // G
-            meshBlob[2 * modelSize * modelSize + y * modelSize + x] = (*px)[0] / 255.0f; // B
+            const uint8_t* px = crop.ptr(y, x);
+            meshBlob[0 * modelSize * modelSize + y * modelSize + x] = px[2] / 255.0f; // R
+            meshBlob[1 * modelSize * modelSize + y * modelSize + x] = px[1] / 255.0f; // G
+            meshBlob[2 * modelSize * modelSize + y * modelSize + x] = px[0] / 255.0f; // B
         }
     }
 
@@ -228,8 +224,8 @@ void FaceTracker::detect(const cv::Mat& bgr, FaceResult& result) {
     for (int i = 0; i < 478; i++) {
         float lx = lms[i * 3], ly = lms[i * 3 + 1], lz = lms[i * 3 + 2];
         // Apply inverse affine to x,y
-        float fx = (float)(invM.at<double>(0, 0) * lx + invM.at<double>(0, 1) * ly + invM.at<double>(0, 2));
-        float fy = (float)(invM.at<double>(1, 0) * lx + invM.at<double>(1, 1) * ly + invM.at<double>(1, 2));
+        float fx = invM[0] * lx + invM[1] * ly + invM[2];
+        float fy = invM[3] * lx + invM[4] * ly + invM[5];
         // Scale z to image pixel scale
         float fz = lz * fullSide / modelSize;
         result.landmarks[i * 3] = fx;
