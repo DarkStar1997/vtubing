@@ -133,9 +133,11 @@ int main(int argc, char** argv) {
             poseTracker.detect(frame, pose);
 
             // Hand tracking: crop ROIs from RTMO's accurate wrist positions.
-            // ROI size is per-hand: use ~2× the elbow-to-wrist distance (a good
-            // proxy for full hand span including spread fingers). Falls back to
-            // ~1× shoulder distance if the elbow is not visible.
+            // ROI size targets ~1× the elbow→wrist distance so the hand fills
+            // most of the 224×224 input the landmarker is trained on (hand
+            // length ≈ 0.7× forearm; ROI = 1× armLen gives ~30% margin).
+            // Larger ROIs leave the hand too small and the model falls back
+            // to its extended-finger prior, especially on curled fists.
             HandResult handLeft, handRight;
             if (pose.detected) {
                 float shoulderDist = std::abs(pose.kpX(PoseLandmarkIdx::L_SHOULDER) -
@@ -149,7 +151,7 @@ int main(int argc, char** argv) {
                         float ex = pose.kpX(elbowIdx), ey = pose.kpY(elbowIdx);
                         armLen = std::sqrt((wx - ex) * (wx - ex) + (wy - ey) * (wy - ey));
                     }
-                    int hs = (int)std::max({armLen * 2.0f, shoulderDist * 1.0f, 160.0f});
+                    int hs = (int)std::max({armLen * 1.0f, shoulderDist * 0.65f, 120.0f});
                     int hrx = wx - hs / 2, hry = wy - hs / 2;
                     HandResult h;
                     handTracker.detect(cropImage(frame, hrx, hry, hs, hs), h);
