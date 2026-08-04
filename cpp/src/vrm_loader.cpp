@@ -139,13 +139,15 @@ VRMModel loadVRM(const std::string& path) {
                     if (vc == std::string::npos || ve == std::string::npos) break;
                     std::string bn = d.substr(vc + 1, ve - vc - 1);
                     size_t objEnd = d.find('}', ve);
-                    if (bn == "head") {
-                        size_t np = d.find("\"node\"", ve);
-                        if (np != std::string::npos && np < objEnd) {
-                            size_t ns = d.find_first_of("0123456789", d.find(':', np));
-                            size_t ne = d.find_first_not_of("0123456789", ns);
-                            model.headNodeIndex = std::stoi(d.substr(ns, ne - ns));
-                            break;
+                    // Parse node index for every bone
+                    size_t np = d.find("\"node\"", ve);
+                    if (np != std::string::npos && np < objEnd) {
+                        size_t ns = d.find_first_of("0123456789", d.find(':', np));
+                        size_t ne = d.find_first_not_of("0123456789", ns);
+                        if (ns != std::string::npos && ns < objEnd) {
+                            int nodeIdx = std::stoi(d.substr(ns, ne - ns));
+                            model.boneNodes[bn] = nodeIdx;
+                            if (bn == "head") model.headNodeIndex = nodeIdx;
                         }
                     }
                     pos = ve + 1;
@@ -263,15 +265,41 @@ VRMModel loadVRM(const std::string& path) {
                 }
             }
         } else {
-            // VRM 1.0: humanBones is dict {"head":{"node":N}}
+            // VRM 1.0: humanBones is dict {"head":{"node":N}, "hips":{"node":N}, ...}
             if (model.headNodeIndex < 0) {
-                size_t hp = d.find("\"head\"");
-                if (hp != std::string::npos) {
-                    size_t np = d.find("\"node\"", hp);
-                    if (np != std::string::npos) {
-                        size_t ns = d.find_first_of("0123456789", d.find(':', np));
-                        size_t ne = d.find_first_not_of("0123456789", ns);
-                        model.headNodeIndex = std::stoi(d.substr(ns, ne - ns));
+                // Find the "humanBones" key in the JSON
+                size_t hbp = d.find("\"humanBones\"");
+                if (hbp != std::string::npos) {
+                    size_t objStart = d.find('{', hbp);
+                    if (objStart != std::string::npos) {
+                        int depth = 0;
+                        size_t k = objStart;
+                        while (k < d.size()) {
+                            if (d[k] == '{') depth++;
+                            else if (d[k] == '}') { depth--; if (depth == 0) break; }
+                            else if (d[k] == '"') {
+                                // Found a key (bone name)
+                                size_t ks = k + 1;
+                                size_t ke = d.find('"', ks);
+                                if (ke == std::string::npos) break;
+                                std::string boneName = d.substr(ks, ke - ks);
+                                // Find "node" value in this bone's object
+                                size_t innerEnd = d.find('}', ke);
+                                size_t np = d.find("\"node\"", ke);
+                                if (np != std::string::npos && np < innerEnd) {
+                                    size_t ns = d.find_first_of("0123456789", d.find(':', np));
+                                    size_t ne = d.find_first_not_of("0123456789", ns);
+                                    if (ns != std::string::npos) {
+                                        int nodeIdx = std::stoi(d.substr(ns, ne - ns));
+                                        model.boneNodes[boneName] = nodeIdx;
+                                        if (boneName == "head") model.headNodeIndex = nodeIdx;
+                                    }
+                                }
+                                k = innerEnd;
+                                continue;
+                            }
+                            k++;
+                        }
                     }
                 }
             }

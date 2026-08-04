@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstdint>
 #include <chrono>
+#include <unordered_map>
 
 struct Framebuffer {
     int width, height;
@@ -25,6 +26,12 @@ struct Timer {
 
 // Compute world matrices for all nodes (recursive TRS).
 std::vector<glm::mat4> computeWorldMatrices(const VRMModel& model);
+
+// Compute world matrices applying local rotation deltas at specified nodes.
+// Each entry: nodeIndex → local rotation delta (post-multiplied onto bind rotation).
+std::vector<glm::mat4> computeWorldMatricesWithOverrides(
+    const VRMModel& model,
+    const std::unordered_map<int, glm::quat>& overrides);
 
 // Compute skinning joint matrices: worldMatrix[jointNode] * IBM[joint]
 std::vector<glm::mat4> computeJointMatrices(

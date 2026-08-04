@@ -69,6 +69,38 @@ std::vector<glm::mat4> computeWorldMatrices(const VRMModel& model) {
     return world;
 }
 
+std::vector<glm::mat4> computeWorldMatricesWithOverrides(
+    const VRMModel& model,
+    const std::unordered_map<int, glm::quat>& overrides)
+{
+    int n = static_cast<int>(model.nodes.size());
+    std::vector<glm::mat4> world(n);
+    std::vector<bool> computed(n, false);
+
+    std::function<void(int)> compute = [&](int i) {
+        if (computed[i]) return;
+        glm::quat rot = model.nodes[i].rotation;
+        auto it = overrides.find(i);
+        if (it != overrides.end())
+            rot = rot * it->second;
+        glm::mat4 local = glm::translate(glm::mat4(1), model.nodes[i].translation)
+                        * glm::mat4_cast(rot)
+                        * glm::scale(glm::mat4(1), model.nodes[i].scale);
+        if (model.nodes[i].parent >= 0) {
+            compute(model.nodes[i].parent);
+            world[i] = world[model.nodes[i].parent] * local;
+        } else {
+            world[i] = local;
+        }
+        computed[i] = true;
+    };
+
+    for (int i = 0; i < n; i++)
+        compute(i);
+
+    return world;
+}
+
 std::vector<glm::mat4> computeJointMatrices(
     const VRMModel& model,
     const std::vector<glm::mat4>& worldMatrices)

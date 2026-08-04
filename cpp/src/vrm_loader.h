@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include <cstdint>
+#include <unordered_map>
 
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
@@ -75,6 +76,17 @@ struct VRMModel {
     glm::vec3 bboxMax = {0, 0, 0};
 
     int headNodeIndex = -1;             // VRM humanoid "head" bone node
+
+    // VRM humanoid bone name → node index
+    // Keys: hips, spine, chest, upperChest, neck, head,
+    //       leftShoulder, rightShoulder,
+    //       leftUpperArm, rightUpperArm, leftLowerArm, rightLowerArm,
+    //       leftHand, rightHand,
+    //       leftUpperLeg, rightUpperLeg, leftLowerLeg, rightLowerLeg,
+    //       leftFoot, rightFoot, leftToes, rightToes,
+    //       leftEye, rightEye,
+    //       + finger bones (leftThumbProximal, etc.)
+    std::unordered_map<std::string, int> boneNodes;
 
     // VRM 0.x blendshape groups
     struct BlendShapeBind {

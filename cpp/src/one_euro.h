@@ -27,6 +27,7 @@ public:
     }
 
     void reset() { initialized_ = false; }
+    float lastFiltered() const { return prevFiltX_; }
 
 private:
     static float alpha(float dt, float cutoff) {

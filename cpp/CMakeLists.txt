@@ -78,6 +78,8 @@ add_executable(vtuber_live
     src/webcam.cpp
     src/onnx_session.cpp
     src/face_tracker.cpp
+    src/pose_tracker.cpp
+    src/hand_tracker.cpp
     src/rig_solver.cpp
     ${RENDER_SOURCES})
 

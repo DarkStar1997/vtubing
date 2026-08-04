@@ -2,6 +2,8 @@
 #include "rasterizer.h"
 #include "webcam.h"
 #include "face_tracker.h"
+#include "pose_tracker.h"
+#include "hand_tracker.h"
 #include "rig_solver.h"
 
 #include <SDL3/SDL.h>
@@ -59,15 +61,16 @@ int main(int argc, char** argv) {
     }
     glm::vec3 centre = (bboxMin + bboxMax) * 0.5f;
     glm::vec3 size = bboxMax - bboxMin;
-    float targetY = centre.y + size.y * 0.28f;
-    float camDist = std::max(size.y * 0.85f, 1.1f);
-    glm::vec3 eye(0, targetY + 0.10f, -camDist);
-    glm::vec3 target(0, targetY - 0.02f, 0);
-    float fovY = glm::radians(28.0f);
+
+    // Camera params: sit-cam (bust shot) + stand-cam (full body)
+    struct CamParams { float targetY; float dist; float fov; };
+    CamParams sitCam{centre.y + size.y * 0.28f, std::max(size.y * 0.85f, 1.1f), 28.0f};
+    CamParams standCam{centre.y, (size.y * 1.1f) / (2.0f * std::tan(glm::radians(15.0f))), 30.0f};
     float aspect = (float)fbWidth / fbHeight;
-    glm::mat4 proj = glm::perspective(fovY, aspect, 0.1f, 100.0f);
-    glm::mat4 view = glm::lookAt(eye, target, glm::vec3(0, 1, 0));
-    glm::mat4 viewProj = proj * view;
+    float curFov = sitCam.fov;
+    float curTargetY = sitCam.targetY;
+    float curDist = sitCam.dist;
+    glm::mat4 viewProj;
 
     // Init systems
     int numThreads = std::min((int)std::thread::hardware_concurrency(), 16);
@@ -79,6 +82,8 @@ int main(int argc, char** argv) {
     }
 
     FaceTracker faceTracker(modelDir);
+    PoseTracker poseTracker(modelDir + "/pose_landmarker.onnx");
+    HandTracker handTracker(modelDir + "/hand_landmarker.onnx");
     RigSolver rigSolver(model);
 
     fprintf(stderr, "[live] Face tracker initialized. Press SPACE to calibrate.\n");
@@ -101,6 +106,9 @@ int main(int argc, char** argv) {
     // --- Async detection thread ---
     struct TrackUpdate {
         FaceResult result;
+        PoseResult pose;
+        HandResult handLeft;
+        HandResult handRight;
         Image annotated;
     };
     TrackUpdate latestTrack;
@@ -120,6 +128,17 @@ int main(int argc, char** argv) {
             FaceResult result;
             faceTracker.detect(frame, result);
 
+            PoseResult pose;
+            poseTracker.detect(frame, pose);
+
+            HandResult handLeft, handRight, handRaw;
+            handTracker.detect(frame, handRaw);
+            // Single-hand model: assign to left or right based on handedness score
+            if (handRaw.detected) {
+                if (handRaw.handedness > 0.5f) handLeft = handRaw;
+                else handRight = handRaw;
+            }
+
             Image annotated;
             if (showPiPAtomic.load()) {
                 annotated = frame;
@@ -137,11 +156,22 @@ int main(int argc, char** argv) {
                             1, yellow);
                     }
                 }
+                if (pose.detected) {
+                    uint8_t cyan[3] = {255, 255, 0};
+                    for (int i = 0; i < 33; i++) {
+                        int px = (int)(pose.lmX(i) * frame.width);
+                        int py = (int)(pose.lmY(i) * frame.height);
+                        drawCircleFilled(annotated, px, py, 2, cyan);
+                    }
+                }
             }
 
             {
                 std::lock_guard<std::mutex> lock(trackMutex);
                 latestTrack.result = std::move(result);
+                latestTrack.pose = std::move(pose);
+                latestTrack.handLeft = std::move(handLeft);
+                latestTrack.handRight = std::move(handRight);
                 latestTrack.annotated = std::move(annotated);
             }
             hasNewTrack.store(true, std::memory_order_release);
@@ -153,6 +183,16 @@ int main(int argc, char** argv) {
     int frameCount = 0;
     int detectCount = 0;
     auto statTime = lastTime;
+
+    // Compute viewProj from current camera params
+    auto computeViewProj = [&]() {
+        glm::vec3 eye(0, curTargetY + 0.10f, -curDist);
+        glm::vec3 tgt(0, curTargetY - 0.02f, 0);
+        glm::mat4 p = glm::perspective(glm::radians(curFov), aspect, 0.1f, 100.0f);
+        glm::mat4 v = glm::lookAt(eye, tgt, glm::vec3(0, 1, 0));
+        viewProj = p * v;
+    };
+    computeViewProj();
 
     // Pre-render a frame with default pose for initial display
     auto proc = processVerticesParallel(model, jointMatrices, viewProj,
@@ -179,10 +219,15 @@ int main(int argc, char** argv) {
 
         // Consume async detection result (non-blocking)
         FaceResult faceResult;
+        PoseResult poseResult;
+        HandResult handLeft, handRight;
         bool hasNew = false;
         if (hasNewTrack.exchange(false, std::memory_order_acquire)) {
             std::lock_guard<std::mutex> lock(trackMutex);
             faceResult = latestTrack.result;
+            poseResult = latestTrack.pose;
+            handLeft = latestTrack.handLeft;
+            handRight = latestTrack.handRight;
             if (showPiP && !latestTrack.annotated.empty()) {
                 lastAnnotated = latestTrack.annotated;
                 pipImg = resizeBilinear(lastAnnotated, pipW, pipH);
@@ -197,7 +242,8 @@ int main(int argc, char** argv) {
                 detectCount++;
                 if (calibrating) {
                     rigSolver.calibrate(faceResult);
-                    if (rigSolver.calibrated()) {
+                    rigSolver.calibratePose();
+                    if (rigSolver.calibrated() && rigSolver.poseCalibrated()) {
                         calibrating = false;
                         fprintf(stderr, "[live] Calibration complete.\n");
                     }
@@ -206,45 +252,77 @@ int main(int argc, char** argv) {
             } else {
                 rigSolver.update(faceResult, trackDt);
             }
+
+            if (poseResult.detected) {
+                rigSolver.updatePose(poseResult, trackDt);
+            } else {
+                rigSolver.updatePose(poseResult, trackDt);
+            }
+
+            rigSolver.updateHands(handLeft, handRight, trackDt);
         }
 
-        // Apply head rotation to joint matrices.
-        // Only recompute on new detection; between updates, persist the
-        // last computed pose to avoid snapping back to bind pose (stutter).
-        if (hasNew && faceResult.detected) {
-            jointMatrices = bindJointMatrices;
+        // Build bone rotation overrides from face + pose + hands
+        if (hasNew) {
+            std::unordered_map<int, glm::quat> overrides;
             glm::quat headRot = rigSolver.headRotation();
             if (headRot != glm::quat(1, 0, 0, 0)) {
-                // Modify head node world matrix and propagate to children
-                std::vector<glm::mat4> modWorld = bindWorldMatrices;
                 int headNode = model.headNodeIndex;
-                if (headNode >= 0 && headNode < (int)modWorld.size()) {
-                    // Apply local rotation at head node
-                    modWorld[headNode] = modWorld[headNode] * glm::mat4_cast(headRot);
-                    // Recompute children's world matrices
-                    std::function<void(int)> updateChildren = [&](int parent) {
-                        for (int c = parent + 1; c < (int)model.nodes.size(); c++) {
-                            if (model.nodes[c].parent == parent) {
-                                glm::mat4 local = glm::translate(glm::mat4(1), model.nodes[c].translation)
-                                    * glm::mat4_cast(model.nodes[c].rotation)
-                                    * glm::scale(glm::mat4(1), model.nodes[c].scale);
-                                modWorld[c] = modWorld[parent] * local;
-                                updateChildren(c);
-                            }
-                        }
-                    };
-                    updateChildren(headNode);
-                    // Recompute joint matrices for affected nodes
-                    for (int ji = 0; ji < (int)model.jointNodes.size(); ji++) {
-                        int ni = model.jointNodes[ji];
-                        if (ni >= 0 && ni < (int)modWorld.size()) {
-                            glm::mat4 ibm = (ji < (int)model.inverseBindMatrices.size())
-                                ? model.inverseBindMatrices[ji] : glm::mat4(1);
-                            jointMatrices[ji] = modWorld[ni] * ibm;
-                        }
-                    }
-                }
+                if (headNode >= 0) overrides[headNode] = headRot;
             }
+            const BodyPose& bp = rigSolver.bodyPose();
+            if (bp.valid) {
+                auto setIf = [&](const std::string& bone, const glm::quat& q) {
+                    auto it = model.boneNodes.find(bone);
+                    if (it != model.boneNodes.end() && q != glm::quat(1, 0, 0, 0))
+                        overrides[it->second] = q;
+                };
+                setIf("spine", bp.spine);
+                setIf("leftUpperArm", bp.leftUpperArm);
+                setIf("rightUpperArm", bp.rightUpperArm);
+                setIf("leftLowerArm", bp.leftLowerArm);
+                setIf("rightLowerArm", bp.rightLowerArm);
+            } else if (rigSolver.calibrated()) {
+                // Rest arm pose: A-pose (relaxed) when sitting
+                auto setRot = [&](const std::string& bone, float x, float y, float z) {
+                    auto it = model.boneNodes.find(bone);
+                    if (it != model.boneNodes.end())
+                        overrides[it->second] = glm::quat(glm::vec3(x, y, z));
+                };
+                setRot("leftUpperArm", 0, 0.20f, 1.30f);
+                setRot("rightUpperArm", 0, -0.20f, -1.30f);
+                setRot("leftLowerArm", 0, 0, -1.15f);
+                setRot("rightLowerArm", 0, 0, 1.15f);
+            }
+            // Merge hand finger overrides
+            for (const auto& [nodeIdx, rot] : rigSolver.handOverrides())
+                overrides[nodeIdx] = rot;
+
+            if (!overrides.empty()) {
+                std::vector<glm::mat4> modWorld =
+                    computeWorldMatricesWithOverrides(model, overrides);
+                jointMatrices = computeJointMatrices(model, modWorld);
+            } else {
+                jointMatrices = bindJointMatrices;
+            }
+        }
+
+        // Dynamic camera: blend sit-cam (bust shot) ↔ stand-cam (full body)
+        {
+            const BodyPose& bp = rigSolver.bodyPose();
+            float frac = bp.valid ? bp.standing : 0.0f;
+            if (bp.valid && bp.bodyExtent > 0.5f)
+                frac = std::min(1.0f, frac + (bp.bodyExtent - 0.5f) * 0.3f);
+            float sit = 1.0f - frac;
+            float newFov = sitCam.fov * sit + standCam.fov * frac;
+            float newTargetY = sitCam.targetY * sit + standCam.targetY * frac;
+            float newDist = sitCam.dist * sit + standCam.dist * frac;
+            // Smooth transitions
+            float camAlpha = std::min(1.0f, dt * 3.0f);
+            curFov += (newFov - curFov) * camAlpha;
+            curTargetY += (newTargetY - curTargetY) * camAlpha;
+            curDist += (newDist - curDist) * camAlpha;
+            computeViewProj();
         }
 
         // Render avatar
