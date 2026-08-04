@@ -26,7 +26,7 @@ int main(int argc, char** argv) {
     }
 
     int fbWidth = 1280, fbHeight = 720;
-    int ss = 1;
+    int ss = 2;  // 2×2 supersampling anti-aliasing (SSAA)
     int renderW = fbWidth * ss, renderH = fbHeight * ss;
 
     fprintf(stderr, "[live] loading VRM: %s\n", vrmPath.c_str());
@@ -159,6 +159,7 @@ int main(int argc, char** argv) {
                                         rigSolver.morphWeights(), renderW, renderH, numThreads);
     ssfb.clear();
     rasterizeParallel(proc, ssfb, model.textures, numThreads);
+    if (ss > 1) downsample2x2(ssfb, fb, numThreads);
 
     while (running) {
         // Events
@@ -251,10 +252,11 @@ int main(int argc, char** argv) {
                                             rigSolver.morphWeights(), renderW, renderH, numThreads);
         ssfb.clear();
         rasterizeParallel(proc, ssfb, model.textures, numThreads);
+        if (ss > 1) downsample2x2(ssfb, fb, numThreads);
 
         // Convert framebuffer RGBA to BGRA8888 for SDL
         // On little-endian, SDL_PIXELFORMAT_BGRA8888 reads bytes as [A,R,G,B]
-        Framebuffer& out = ssfb;
+        Framebuffer& out = (ss > 1) ? fb : ssfb;
         for (int i = 0; i < fbWidth * fbHeight; i++) {
             bgraBuf[i*4+0] = 255;               // A
             bgraBuf[i*4+1] = out.color[i*4+0];  // R

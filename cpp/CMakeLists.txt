@@ -72,9 +72,6 @@ target_link_libraries(vtuber_cpu PRIVATE SDL3::SDL3 glm::glm)
 target_compile_options(vtuber_cpu PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-mavx2 -mfma -mbmi2>)
 
-# Fast-math only on rasterizeTri (separate file to avoid breaking vertex transform)
-set_source_files_properties(src/rasterizer_tri.cpp PROPERTIES COMPILE_OPTIONS "-ffast-math")
-
 # --- Live tracking target (webcam + ONNX inference + real-time render) ---
 add_executable(vtuber_live
     src/main_live.cpp
@@ -103,8 +100,6 @@ set_target_properties(vtuber_live PROPERTIES
 
 target_compile_options(vtuber_live PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-mavx2 -mfma -mbmi2>)
-
-set_source_files_properties(src/rasterizer_tri.cpp PROPERTIES COMPILE_OPTIONS "-ffast-math")
 
 # --- Test tracker target (static image inference) ---
 add_executable(test_tracker

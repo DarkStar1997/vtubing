@@ -45,11 +45,12 @@ void Framebuffer::clear(float depthClear) {
 
 std::vector<glm::mat4> computeWorldMatrices(const VRMModel& model) {
     int n = static_cast<int>(model.nodes.size());
-    std::vector<glm::mat4> world(n, glm::mat4(std::numeric_limits<float>::quiet_NaN()));
+    std::vector<glm::mat4> world(n);
+    std::vector<bool> computed(n, false);
 
     // Recursive helper
     std::function<void(int)> compute = [&](int i) {
-        if (!std::isnan(world[i][0][0])) return; // already computed
+        if (computed[i]) return;
         glm::mat4 local = glm::translate(glm::mat4(1), model.nodes[i].translation)
                         * glm::mat4_cast(model.nodes[i].rotation)
                         * glm::scale(glm::mat4(1), model.nodes[i].scale);
@@ -59,6 +60,7 @@ std::vector<glm::mat4> computeWorldMatrices(const VRMModel& model) {
         } else {
             world[i] = local;
         }
+        computed[i] = true;
     };
 
     for (int i = 0; i < n; i++)
