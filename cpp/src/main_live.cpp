@@ -147,20 +147,34 @@ int main(int argc, char** argv) {
             }
 
             HandResult handLeft, handRight;
-            // Crop hand ROI from pose wrist landmark if available
-            if (pose.detected) {
+            // Crop hand ROI from projected world wrist positions
+            if (pose.detected && result.detected) {
+                // Project world landmarks to frame coords (same as PiP drawing)
+                float fcx = (result.bboxX1 + result.bboxX2) * 0.5f;
+                float fcy = (result.bboxY1 + result.bboxY2) * 0.5f;
+                float fw = result.bboxX2 - result.bboxX1;
+                float wnx = pose.wlX(0), wny = pose.wlY(0);
+                float wsx = (pose.wlX(11) + pose.wlX(12)) * 0.5f;
+                float wsy = (pose.wlY(11) + pose.wlY(12)) * 0.5f;
+                float wFaceH = std::sqrt((wnx-wsx)*(wnx-wsx) + (wny-wsy)*(wny-wsy));
+                float projScale = (wFaceH > 1e-5f) ? (fw / wFaceH) : 300.0f;
+                auto project = [&](int idx) {
+                    float dx = pose.wlX(idx) - wnx;
+                    float dy = pose.wlY(idx) - wny;
+                    return std::make_pair((int)(fcx + dx * projScale), (int)(fcy + dy * projScale));
+                };
                 auto detectHand = [&](int wristIdx, HandResult& outResult) {
-                    if (pose.lmVis(wristIdx) <= 0.3f) return;
-                    int wx = (int)((pose.lmX(wristIdx) * 256.0f - pose.lbPadX) / pose.lbScale) + pose.roiX;
-                    int wy = (int)((pose.lmY(wristIdx) * 256.0f - pose.lbPadY) / pose.lbScale) + pose.roiY;
-                    int hs = (int)std::max((float)frame.width * 0.15f, 80.0f);
+                    auto [wx, wy] = project(wristIdx);
+                    int hs = (int)std::max(fw * 0.8f, 80.0f);
                     int hrx = wx - hs/2, hry = wy - hs/2;
                     HandResult h;
                     handTracker.detect(cropImage(frame, hrx, hry, hs, hs), h);
                     if (h.detected) { h.roiX = hrx; h.roiY = hry; outResult = h; }
                 };
-                detectHand(PoseLandmarkIdx::L_WRIST, handLeft);
-                detectHand(PoseLandmarkIdx::R_WRIST, handRight);
+                if (pose.lmVis(PoseLandmarkIdx::L_WRIST) > 0.3f)
+                    detectHand(PoseLandmarkIdx::L_WRIST, handLeft);
+                if (pose.lmVis(PoseLandmarkIdx::R_WRIST) > 0.3f)
+                    detectHand(PoseLandmarkIdx::R_WRIST, handRight);
             }
 
             Image annotated;
@@ -180,15 +194,27 @@ int main(int argc, char** argv) {
                             1, yellow);
                     }
                 }
-                if (pose.detected) {
-                    // Un-project from letterbox-normalized coords through ROI to original frame pixels
-                    auto toFrame = [&](float nx, float ny) {
-                        int px = (int)((nx * 256.0f - pose.lbPadX) / pose.lbScale) + pose.roiX;
-                        int py = (int)((ny * 256.0f - pose.lbPadY) / pose.lbScale) + pose.roiY;
-                        return std::make_pair(px, py);
+                if (pose.detected && result.detected) {
+                    // The pose model's IMAGE coordinates are unreliable without
+                    // its detector (compressed near canvas center). Project WORLD
+                    // landmarks to frame coords using the face bbox as reference.
+                    float fcx = (result.bboxX1 + result.bboxX2) * 0.5f;
+                    float fcy = (result.bboxY1 + result.bboxY2) * 0.5f;
+                    float fw = result.bboxX2 - result.bboxX1;
+                    // World nose → frame face center. Scale from world→frame.
+                    float wnx = pose.wlX(0), wny = pose.wlY(0);
+                    // World face size ≈ nose-to-shoulder distance
+                    float wsx = (pose.wlX(11) + pose.wlX(12)) * 0.5f;
+                    float wsy = (pose.wlY(11) + pose.wlY(12)) * 0.5f;
+                    float wFaceH = std::sqrt((wnx-wsx)*(wnx-wsx) + (wny-wsy)*(wny-wsy));
+                    float projScale = (wFaceH > 1e-5f) ? (fw / wFaceH) : 300.0f;
+                    auto toFrame = [&](int idx) {
+                        float dx = pose.wlX(idx) - wnx;
+                        float dy = pose.wlY(idx) - wny;
+                        return std::make_pair((int)(fcx + dx * projScale),
+                                              (int)(fcy + dy * projScale));
                     };
                     uint8_t cyan[3] = {255, 255, 0};
-                    // Pose skeleton connections (BlazePose upper + lower body)
                     static const int POSE_CONN[][2] = {
                         {11,12},{11,13},{13,15},{12,14},{14,16},
                         {15,17},{15,19},{15,21},{17,19},
@@ -199,15 +225,15 @@ int main(int argc, char** argv) {
                     };
                     for (auto& c : POSE_CONN) {
                         if (c[0] < 33 && c[1] < 33) {
-                            auto [x0, y0] = toFrame(pose.lmX(c[0]), pose.lmY(c[0]));
-                            auto [x1, y1] = toFrame(pose.lmX(c[1]), pose.lmY(c[1]));
+                            auto [x0, y0] = toFrame(c[0]);
+                            auto [x1, y1] = toFrame(c[1]);
                             drawLine(annotated, x0, y0, x1, y1, cyan, 2);
                         }
                     }
                     for (int i = 0; i < 33; i++) {
-                        auto [px, py] = toFrame(pose.lmX(i), pose.lmY(i));
+                        auto [px, py] = toFrame(i);
                         bool upper = (i >= 11 && i <= 16);
-                        uint8_t dotColor[3] = {0, 0, 255};  // red BGR for upper body joints
+                        uint8_t dotColor[3] = {0, 0, 255};
                         if (!upper) { dotColor[0] = 0; dotColor[1] = 180; dotColor[2] = 180; }
                         drawCircleFilled(annotated, px, py, 3, dotColor);
                     }
