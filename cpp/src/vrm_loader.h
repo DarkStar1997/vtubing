@@ -76,6 +76,19 @@ struct VRMModel {
 
     int headNodeIndex = -1;             // VRM humanoid "head" bone node
 
+    // VRM 0.x blendshape groups
+    struct BlendShapeBind {
+        int mesh;      // glTF mesh index
+        int index;     // morph target index within mesh
+        float weight;  // 0-100
+    };
+    struct BlendShapeGroup {
+        std::string name;
+        std::string presetName;  // e.g. "a", "i", "blink", "happy"
+        std::vector<BlendShapeBind> binds;
+    };
+    std::vector<BlendShapeGroup> blendShapeGroups;
+
     int totalTriangles() const;
     int totalVertices() const;
 };

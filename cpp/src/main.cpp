@@ -208,10 +208,10 @@ int main(int argc, char** argv) {
 
     std::vector<uint8_t> bgra(fbWidth * fbHeight * 4);
     for (int i = 0; i < fbWidth * fbHeight; i++) {
-        bgra[i * 4 + 0] = out.color[i * 4 + 2];
-        bgra[i * 4 + 1] = out.color[i * 4 + 1];
-        bgra[i * 4 + 2] = out.color[i * 4 + 0];
-        bgra[i * 4 + 3] = 255;
+        bgra[i * 4 + 0] = 255;                  // A
+        bgra[i * 4 + 1] = out.color[i * 4 + 0]; // R
+        bgra[i * 4 + 2] = out.color[i * 4 + 1]; // G
+        bgra[i * 4 + 3] = out.color[i * 4 + 2]; // B
     }
 
     SDL_Surface* fbSurface = SDL_CreateSurfaceFrom(

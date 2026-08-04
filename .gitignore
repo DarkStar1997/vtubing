@@ -18,9 +18,13 @@ __pycache__/
 
 # Project binaries (downloaded / provided separately)
 assets/models/*.task
+assets/models/*.onnx
 *.vrm
 *.glb
 *.gltf
+
+# ONNX Runtime (pre-built, downloaded separately)
+cpp/third_party/onnxruntime-linux-x64-*/
 
 # Output artifacts
 /output/

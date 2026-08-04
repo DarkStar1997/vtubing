@@ -181,6 +181,86 @@ VRMModel loadVRM(const std::string& path) {
                     }
                 }
             }
+
+            // VRM 0.x blendShapeMaster: blendShapeGroups with preset + binds
+            size_t bsm = d.find("\"blendShapeMaster\"");
+            if (bsm != std::string::npos) {
+                size_t groupsPos = d.find("\"blendShapeGroups\"", bsm);
+                if (groupsPos != std::string::npos) {
+                    size_t arrS = d.find('[', groupsPos);
+                    if (arrS != std::string::npos) {
+                        int depth = 0;
+                        size_t objS = std::string::npos;
+                        for (size_t k = arrS + 1; k < d.size(); k++) {
+                            if (d[k] == '{') {
+                                if (depth == 0) objS = k;
+                                depth++;
+                            } else if (d[k] == '}') {
+                                depth--;
+                                if (depth == 0 && objS != std::string::npos) {
+                                    VRMModel::BlendShapeGroup g;
+                                    // Extract preset name
+                                    size_t pp = d.find("\"presetName\"", objS);
+                                    if (pp != std::string::npos && pp < k) {
+                                        size_t vc = d.find('"', d.find(':', pp) + 1);
+                                        size_t ve = d.find('"', vc + 1);
+                                        if (vc != std::string::npos && ve != std::string::npos)
+                                            g.presetName = d.substr(vc + 1, ve - vc - 1);
+                                    }
+                                    // Extract name
+                                    size_t np2 = d.find("\"name\"", objS);
+                                    if (np2 != std::string::npos && np2 < k) {
+                                        size_t vc = d.find('"', d.find(':', np2) + 1);
+                                        size_t ve = d.find('"', vc + 1);
+                                        if (vc != std::string::npos && ve != std::string::npos)
+                                            g.name = d.substr(vc + 1, ve - vc - 1);
+                                    }
+                                    // Extract binds array
+                                    size_t bp = d.find("\"binds\"", objS);
+                                    if (bp != std::string::npos && bp < k) {
+                                        size_t bArrS = d.find('[', bp);
+                                        if (bArrS != std::string::npos) {
+                                            size_t bEnd = bArrS + 1;
+                                            int bDepth = 0;
+                                            for (size_t bk = bArrS + 1; bk < d.size(); bk++) {
+                                                if (d[bk] == '{') { bDepth++; }
+                                                else if (d[bk] == '}') {
+                                                    bDepth--;
+                                                    if (bDepth == 0) {
+                                                        VRMModel::BlendShapeBind b;
+                                                        size_t mp2 = d.find("\"mesh\"", bEnd);
+                                                        size_t ip2 = d.find("\"index\"", bEnd);
+                                                        size_t wp2 = d.find("\"weight\"", bEnd);
+                                                        if (mp2 != std::string::npos && mp2 < bk) {
+                                                            auto s = d.find_first_of("0123456789", d.find(':', mp2));
+                                                            auto e = d.find_first_not_of("0123456789", s);
+                                                            b.mesh = std::stoi(d.substr(s, e - s));
+                                                        }
+                                                        if (ip2 != std::string::npos && ip2 < bk) {
+                                                            auto s = d.find_first_of("0123456789", d.find(':', ip2));
+                                                            auto e = d.find_first_not_of("0123456789", s);
+                                                            b.index = std::stoi(d.substr(s, e - s));
+                                                        }
+                                                        if (wp2 != std::string::npos && wp2 < bk) {
+                                                            auto s = d.find_first_of("0123456789-", d.find(':', wp2));
+                                                            auto e = d.find_first_not_of("0123456789.", s);
+                                                            b.weight = std::stof(d.substr(s, e - s));
+                                                        }
+                                                        g.binds.push_back(b);
+                                                        bEnd = bk + 1;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    model.blendShapeGroups.push_back(g);
+                                    objS = std::string::npos;
+                                }
+                            } else if (d[k] == ']' && depth == 0) break;
+                        }
+                    }
+                }
+            }
         } else {
             // VRM 1.0: humanBones is dict {"head":{"node":N}}
             if (model.headNodeIndex < 0) {
