@@ -132,23 +132,31 @@ int main(int argc, char** argv) {
             PoseResult pose;
             poseTracker.detect(frame, pose);
 
-            // Hand tracking: crop ROIs from RTMO's accurate wrist positions
+            // Hand tracking: crop ROIs from RTMO's accurate wrist positions.
+            // ROI size is per-hand: use ~2× the elbow-to-wrist distance (a good
+            // proxy for full hand span including spread fingers). Falls back to
+            // ~1× shoulder distance if the elbow is not visible.
             HandResult handLeft, handRight;
             if (pose.detected) {
                 float shoulderDist = std::abs(pose.kpX(PoseLandmarkIdx::L_SHOULDER) -
                                               pose.kpX(PoseLandmarkIdx::R_SHOULDER));
-                int hs = (int)std::max(shoulderDist * 0.55f, 80.0f);
-                auto detectHand = [&](int wristIdx, HandResult& outResult) {
+                auto detectHand = [&](int wristIdx, int elbowIdx, HandResult& outResult) {
                     if (pose.kpScore(wristIdx) < 0.3f) return;
                     int wx = (int)pose.kpX(wristIdx);
                     int wy = (int)pose.kpY(wristIdx);
+                    float armLen = 0.0f;
+                    if (pose.kpScore(elbowIdx) > 0.3f) {
+                        float ex = pose.kpX(elbowIdx), ey = pose.kpY(elbowIdx);
+                        armLen = std::sqrt((wx - ex) * (wx - ex) + (wy - ey) * (wy - ey));
+                    }
+                    int hs = (int)std::max({armLen * 2.0f, shoulderDist * 1.0f, 160.0f});
                     int hrx = wx - hs / 2, hry = wy - hs / 2;
                     HandResult h;
                     handTracker.detect(cropImage(frame, hrx, hry, hs, hs), h);
                     if (h.detected) { h.roiX = hrx; h.roiY = hry; outResult = h; }
                 };
-                detectHand(PoseLandmarkIdx::L_WRIST, handLeft);
-                detectHand(PoseLandmarkIdx::R_WRIST, handRight);
+                detectHand(PoseLandmarkIdx::L_WRIST, PoseLandmarkIdx::L_ELBOW, handLeft);
+                detectHand(PoseLandmarkIdx::R_WRIST, PoseLandmarkIdx::R_ELBOW, handRight);
             }
 
             Image annotated;
