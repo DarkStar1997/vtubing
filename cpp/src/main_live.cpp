@@ -9,6 +9,8 @@
 #include <cmath>
 #include <vector>
 #include <thread>
+#include <atomic>
+#include <mutex>
 #include <chrono>
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/quaternion.hpp>
@@ -89,11 +91,62 @@ int main(int argc, char** argv) {
     SDL_Window* window = SDL_CreateWindow("VTuber Live", fbWidth, fbHeight, 0);
     SDL_Surface* winSurface = SDL_GetWindowSurface(window);
 
-    bool running = true, showPiP = true, calibrating = false;
+    bool showPiP = true, calibrating = false;
     SDL_Event event;
     Image lastAnnotated;  // cached PiP frame, reused between webcam updates
     Image pipImg;         // pre-resized PiP (updated at webcam rate, not render rate)
     const int pipW = 320, pipH = 240;
+    std::vector<uint8_t> bgraBuf(fbWidth * fbHeight * 4);  // pre-allocated BGRA buffer
+
+    // --- Async detection thread ---
+    struct TrackUpdate {
+        FaceResult result;
+        Image annotated;
+    };
+    TrackUpdate latestTrack;
+    std::mutex trackMutex;
+    std::atomic<bool> hasNewTrack{false};
+    std::atomic<bool> running{true};
+    std::atomic<bool> showPiPAtomic{true};
+
+    std::thread detectThread([&]() {
+        while (running.load()) {
+            bool isNew = false;
+            Image frame = webcam.getLatest(isNew);
+            if (frame.empty() || !isNew) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                continue;
+            }
+            FaceResult result;
+            faceTracker.detect(frame, result);
+
+            Image annotated;
+            if (showPiPAtomic.load()) {
+                annotated = frame;
+                if (result.detected) {
+                    uint8_t green[3] = {0, 255, 0};
+                    uint8_t yellow[3] = {0, 255, 255};
+                    drawRect(annotated,
+                        (int)result.bboxX1, (int)result.bboxY1,
+                        (int)result.bboxX2, (int)result.bboxY2,
+                        green, 2);
+                    for (int i = 0; i < 478; i += 10) {
+                        drawCircleFilled(annotated,
+                            (int)result.landmarks[i*3],
+                            (int)result.landmarks[i*3+1],
+                            1, yellow);
+                    }
+                }
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(trackMutex);
+                latestTrack.result = std::move(result);
+                latestTrack.annotated = std::move(annotated);
+            }
+            hasNewTrack.store(true, std::memory_order_release);
+        }
+    });
 
     auto lastTime = std::chrono::steady_clock::now();
     auto lastTrackTime = lastTime;  // for correct dt between face-tracking updates
@@ -113,7 +166,7 @@ int main(int argc, char** argv) {
             if (event.type == SDL_EVENT_QUIT) running = false;
             if (event.type == SDL_EVENT_KEY_DOWN) {
                 if (event.key.key == SDLK_ESCAPE) running = false;
-                if (event.key.key == SDLK_W) showPiP = !showPiP;
+                if (event.key.key == SDLK_W) { showPiP = !showPiP; showPiPAtomic.store(showPiP); }
                 if (event.key.key == SDLK_SPACE) { calibrating = true; fprintf(stderr, "[live] Calibrating...\n"); }
             }
         }
@@ -123,22 +176,21 @@ int main(int argc, char** argv) {
         lastTime = now;
         if (dt > 0.1f) dt = 0.1f;
 
-        // Get latest webcam frame
-        bool isNew = false;
-        Image frame = webcam.getLatest(isNew);
-
+        // Consume async detection result (non-blocking)
         FaceResult faceResult;
+        bool hasNew = false;
+        if (hasNewTrack.exchange(false, std::memory_order_acquire)) {
+            std::lock_guard<std::mutex> lock(trackMutex);
+            faceResult = latestTrack.result;
+            if (showPiP && !latestTrack.annotated.empty()) {
+                lastAnnotated = latestTrack.annotated;
+                pipImg = resizeBilinear(lastAnnotated, pipW, pipH);
+            }
+            hasNew = true;
 
-        if (!frame.empty() && isNew) {
-            // Run face tracking
-            faceTracker.detect(frame, faceResult);
-
-            // dt between consecutive tracking updates (not render frames)
             float trackDt = std::chrono::duration<float>(now - lastTrackTime).count();
             lastTrackTime = now;
             if (trackDt > 0.1f) trackDt = 0.1f;
-
-            if (showPiP) lastAnnotated = frame;
 
             if (faceResult.detected) {
                 detectCount++;
@@ -149,39 +201,16 @@ int main(int argc, char** argv) {
                         fprintf(stderr, "[live] Calibration complete.\n");
                     }
                 }
-
                 rigSolver.update(faceResult, trackDt);
-
-                // Draw annotations
-                if (showPiP && !lastAnnotated.empty()) {
-                    // Bounding box
-                    uint8_t green[3] = {0, 255, 0};
-                    uint8_t yellow[3] = {0, 255, 255};
-                    drawRect(lastAnnotated,
-                        (int)faceResult.bboxX1, (int)faceResult.bboxY1,
-                        (int)faceResult.bboxX2, (int)faceResult.bboxY2,
-                        green, 2);
-                    // Some landmarks
-                    for (int i = 0; i < 478; i += 10) {
-                        drawCircleFilled(lastAnnotated,
-                            (int)faceResult.landmarks[i*3],
-                            (int)faceResult.landmarks[i*3+1],
-                            1, yellow);
-                    }
-                }
             } else {
                 rigSolver.update(faceResult, trackDt);
-            }
-            // Resize PiP once per new webcam frame (~30fps), not per render frame
-            if (showPiP && !lastAnnotated.empty()) {
-                pipImg = resizeBilinear(lastAnnotated, pipW, pipH);
             }
         }
 
         // Apply head rotation to joint matrices.
-        // Only recompute on detection frames; between detections, persist the
+        // Only recompute on new detection; between updates, persist the
         // last computed pose to avoid snapping back to bind pose (stutter).
-        if (faceResult.detected) {
+        if (hasNew && faceResult.detected) {
             jointMatrices = bindJointMatrices;
             glm::quat headRot = rigSolver.headRotation();
             if (headRot != glm::quat(1, 0, 0, 0)) {
@@ -225,13 +254,12 @@ int main(int argc, char** argv) {
 
         // Convert framebuffer RGBA to BGRA8888 for SDL
         // On little-endian, SDL_PIXELFORMAT_BGRA8888 reads bytes as [A,R,G,B]
-        std::vector<uint8_t> bgra(fbWidth * fbHeight * 4);
         Framebuffer& out = ssfb;
         for (int i = 0; i < fbWidth * fbHeight; i++) {
-            bgra[i*4+0] = 255;               // A
-            bgra[i*4+1] = out.color[i*4+0];  // R
-            bgra[i*4+2] = out.color[i*4+1];  // G
-            bgra[i*4+3] = out.color[i*4+2];  // B
+            bgraBuf[i*4+0] = 255;               // A
+            bgraBuf[i*4+1] = out.color[i*4+0];  // R
+            bgraBuf[i*4+2] = out.color[i*4+1];  // G
+            bgraBuf[i*4+3] = out.color[i*4+2];  // B
         }
 
         // PiP overlay
@@ -242,16 +270,16 @@ int main(int argc, char** argv) {
                 for (int px = 0; px < pipW; px++) {
                     const uint8_t* src = pipImg.ptr(py, px);
                     int di = ((pipY + py) * fbWidth + (pipX + px)) * 4;
-                    bgra[di+0] = 255;        // A
-                    bgra[di+1] = src[2];     // R (from BGR)
-                    bgra[di+2] = src[1];     // G
-                    bgra[di+3] = src[0];     // B
+                    bgraBuf[di+0] = 255;        // A
+                    bgraBuf[di+1] = src[2];     // R (from BGR)
+                    bgraBuf[di+2] = src[1];     // G
+                    bgraBuf[di+3] = src[0];     // B
                 }
             }
         }
 
         SDL_Surface* fbSurface = SDL_CreateSurfaceFrom(
-            fbWidth, fbHeight, SDL_PIXELFORMAT_BGRA8888, bgra.data(), fbWidth * 4);
+            fbWidth, fbHeight, SDL_PIXELFORMAT_BGRA8888, bgraBuf.data(), fbWidth * 4);
         SDL_BlitSurface(fbSurface, nullptr, winSurface, nullptr);
         SDL_UpdateWindowSurface(window);
         SDL_DestroySurface(fbSurface);
@@ -276,6 +304,8 @@ int main(int argc, char** argv) {
         }
     }
 
+    running = false;
+    detectThread.join();
     webcam.stop();
     SDL_DestroyWindow(window);
     SDL_Quit();
