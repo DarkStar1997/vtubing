@@ -130,7 +130,7 @@ int main(int argc, char** argv) {
                         (int)result.bboxX1, (int)result.bboxY1,
                         (int)result.bboxX2, (int)result.bboxY2,
                         green, 2);
-                    for (int i = 0; i < 478; i += 10) {
+                    for (int i = 0; i < 478; i++) {
                         drawCircleFilled(annotated,
                             (int)result.landmarks[i*3],
                             (int)result.landmarks[i*3+1],

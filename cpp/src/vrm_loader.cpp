@@ -224,6 +224,7 @@ VRMModel loadVRM(const std::string& path) {
                                             int bDepth = 0;
                                             for (size_t bk = bArrS + 1; bk < d.size(); bk++) {
                                                 if (d[bk] == '{') { bDepth++; }
+                                                else if (d[bk] == ']' && bDepth == 0) break;
                                                 else if (d[bk] == '}') {
                                                     bDepth--;
                                                     if (bDepth == 0) {
