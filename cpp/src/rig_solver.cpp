@@ -298,9 +298,15 @@ void RigSolver::updateHands(const HandResult& left, const HandResult& right, flo
                 } else {
                     // Other fingers: Z-axis rotation
                     handOverrides_[nodeIdx] = glm::angleAxis(flex * zSign, glm::vec3(0, 0, 1));
-                }
-            }
         }
+    }
+
+    // Blinks (ARKit indices 9=eyeBlinkLeft, 10=eyeBlinkRight) are very fast
+    // events (100-300ms). The default 1 Hz filter only reaches ~17% per frame
+    // → eyelids barely close. Use a high cutoff for near-instant response.
+    bsFilters_[9] = OneEuroFilter(20.0f, 0.0f, 10.0f);
+    bsFilters_[10] = OneEuroFilter(20.0f, 0.0f, 10.0f);
+}
 
         // Palm twist on hand bone (X-axis)
         if (handBoneNodes_[side] >= 0) {
