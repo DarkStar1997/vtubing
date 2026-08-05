@@ -117,6 +117,13 @@ int main(int argc, char** argv) {
     std::atomic<bool> running{true};
     std::atomic<bool> showPiPAtomic{true};
 
+    // EMA smoothing state for hand landmark PiP annotations.
+    // Reduces per-frame model jitter. [0]=left, [1]=right.
+    std::array<std::array<float, 21 * 2>, 2> smoothHandPos;
+    std::array<float, 2> smoothHandLen;
+    for (auto& a : smoothHandPos) a.fill(std::nanf(""));
+    smoothHandLen.fill(std::nanf(""));
+
     std::thread detectThread([&]() {
         while (running.load()) {
             bool isNew = false;
@@ -143,6 +150,20 @@ int main(int argc, char** argv) {
                 float faceHeight = result.detected
                     ? (result.bboxY2 - result.bboxY1) : 0.0f;
                 float handRef = faceHeight > 0.0f ? faceHeight : 150.0f;
+
+                // Suppress hand tracking when wrists are close enough that
+                // the ROIs would overlap. The landmarker can't distinguish
+                // overlapping hands (it was trained on single-hand detector
+                // crops) and returns unreliable/garbage landmarks.
+                bool canTrackHands = true;
+                if (pose.kpScore(PoseLandmarkIdx::L_WRIST) > 0.3f &&
+                    pose.kpScore(PoseLandmarkIdx::R_WRIST) > 0.3f) {
+                    float wdx = pose.kpX(PoseLandmarkIdx::L_WRIST) - pose.kpX(PoseLandmarkIdx::R_WRIST);
+                    float wdy = pose.kpY(PoseLandmarkIdx::L_WRIST) - pose.kpY(PoseLandmarkIdx::R_WRIST);
+                    float wristSep = std::sqrt(wdx*wdx + wdy*wdy);
+                    if (wristSep < handRef * 1.2f) canTrackHands = false;
+                }
+
                 auto detectHand = [&](int wristIdx, int elbowIdx, HandResult& outResult) {
                     if (pose.kpScore(wristIdx) < 0.3f) return;
                     int wx = (int)pose.kpX(wristIdx);
@@ -167,14 +188,28 @@ int main(int argc, char** argv) {
                     HandResult h;
                     handTracker.detect(cropImage(frame, hrx, hry, hs, hs), h);
                     if (h.detected) {
+                        // Verify the detected wrist matches the RTMO wrist.
+                        // When hands cross/overlap, the ROI contains both
+                        // hands and the landmarker may detect the WRONG one.
+                        // Its wrist landmark will be far from the RTMO anchor
+                        // → reject the detection.
+                        float uwristX = (h.lmX(0) - h.lbPadX) / h.lbScale + hrx;
+                        float uwristY = (h.lmY(0) - h.lbPadY) / h.lbScale + hry;
+                        float wdx = uwristX - (float)wx;
+                        float wdy = uwristY - (float)wy;
+                        float wristErr = std::sqrt(wdx*wdx + wdy*wdy);
+                        if (wristErr > handRef * 0.5f) return;
+
                         h.roiX = hrx; h.roiY = hry;
                         h.anchorX = (float)wx; h.anchorY = (float)wy;
                         h.armLen = handRef;  // face height = expected hand length
                         outResult = h;
                     }
                 };
-                detectHand(PoseLandmarkIdx::L_WRIST, PoseLandmarkIdx::L_ELBOW, handLeft);
-                detectHand(PoseLandmarkIdx::R_WRIST, PoseLandmarkIdx::R_ELBOW, handRight);
+                if (canTrackHands) {
+                    detectHand(PoseLandmarkIdx::L_WRIST, PoseLandmarkIdx::L_ELBOW, handLeft);
+                    detectHand(PoseLandmarkIdx::R_WRIST, PoseLandmarkIdx::R_ELBOW, handRight);
+                }
             }
 
             Image annotated;
@@ -203,7 +238,7 @@ int main(int argc, char** argv) {
                         {11,13},{13,15},{12,14},{14,16},
                     };
                     for (auto& c : POSE_CONN) {
-                        if (pose.kpScore(c[0]) > 0.3f && pose.kpScore(c[1]) > 0.3f) {
+                        if (pose.kpScore(c[0]) > 0.15f && pose.kpScore(c[1]) > 0.15f) {
                             drawLine(annotated,
                                 (int)pose.kpX(c[0]), (int)pose.kpY(c[0]),
                                 (int)pose.kpX(c[1]), (int)pose.kpY(c[1]),
@@ -212,13 +247,18 @@ int main(int argc, char** argv) {
                     }
                     uint8_t dotColor[3] = {0, 0, 255};
                     for (int i = 0; i < 17; i++) {
-                        if (pose.kpScore(i) > 0.3f)
+                        if (pose.kpScore(i) > 0.15f)
                             drawCircleFilled(annotated, (int)pose.kpX(i), (int)pose.kpY(i), 3, dotColor);
                     }
                 }
                 // Hand skeleton
-                auto drawHandSkeleton = [&](const HandResult& hr) {
-                    if (!hr.detected) return;
+                auto drawHandSkeleton = [&](const HandResult& hr, int handIdx) {
+                    if (!hr.detected) {
+                        // Reset smoother when hand lost
+                        smoothHandPos[handIdx].fill(std::nanf(""));
+                        smoothHandLen[handIdx] = std::nanf("");
+                        return;
+                    }
                     // Hand landmarker outputs landmarks in 224-canvas pixel
                     // coords (NOT normalized); un-letterbox back to ROI frame.
                     auto toFrame = [&](float px224, float py224) {
@@ -227,12 +267,6 @@ int main(int argc, char** argv) {
                         return std::make_pair(px, py);
                     };
 
-                    // The landmarker returns FIXED-SCALE landmarks (~115px
-                    // wrist→midtip on the 224-canvas) regardless of the
-                    // actual hand size in the input. Without MediaPipe's
-                    // detector (which provides a tight rotation-normalized
-                    // crop), the landmarks are always ~50% of canvas scale.
-                    // Rescale to the anthropometric hand length (0.7× forearm).
                     std::pair<int,int> frameLm[21];
                     for (int i = 0; i < 21; i++)
                         frameLm[i] = toFrame(hr.lmX(i), hr.lmY(i));
@@ -243,11 +277,8 @@ int main(int argc, char** argv) {
                     int anchorY = frameLm[0].second;
                     if (hr.anchorX >= 0.0f) { anchorX = (int)hr.anchorX; anchorY = (int)hr.anchorY; }
 
-                    // Scale factor: expected hand length vs model's output.
-                    // The landmarker always returns ~115px wrist→midtip on
-                    // the 224-canvas regardless of actual hand size, so we
-                    // scale to the expected hand length (≈ face height, stored
-                    // in hr.armLen).
+                    // EMA-smooth modelLen to stabilize the scale factor
+                    // (raw modelLen jitters frame-to-frame → fingers stretch).
                     float modelLen = 0;
                     static const int tips[] = {4, 8, 12, 16, 20};
                     for (int t : tips) {
@@ -256,18 +287,33 @@ int main(int argc, char** argv) {
                         float d = std::sqrt(dx*dx + dy*dy);
                         if (d > modelLen) modelLen = d;
                     }
-                    // Hand length ≈ face height (stored in armLen field)
+                    if (!std::isnan(smoothHandLen[handIdx]))
+                        modelLen = smoothHandLen[handIdx] + (modelLen - smoothHandLen[handIdx]) * 0.3f;
+                    smoothHandLen[handIdx] = modelLen;
+
                     float expectedLen = (hr.armLen > 1.0f) ? hr.armLen : modelLen;
                     float scale = (modelLen > 1.0f) ? expectedLen / modelLen : 1.0f;
-                    // Clamp to prevent extreme stretching when the model
-                    // returns compressed landmarks (partial hand in frame).
                     scale = std::clamp(scale, 0.8f, 1.5f);
 
-                    auto toFrameScaled = [&](int i) {
-                        float dx = (frameLm[i].first - frameLm[0].first) * scale;
-                        float dy = (frameLm[i].second - frameLm[0].second) * scale;
-                        return std::make_pair((int)(anchorX + dx), (int)(anchorY + dy));
-                    };
+                    // Compute scaled frame positions, then EMA-smooth to
+                    // reduce per-frame landmark jitter.
+                    const float alpha = 0.35f;
+                    float sx[21], sy[21];
+                    for (int i = 0; i < 21; i++) {
+                        sx[i] = anchorX + (frameLm[i].first - frameLm[0].first) * scale;
+                        sy[i] = anchorY + (frameLm[i].second - frameLm[0].second) * scale;
+                    }
+                    if (std::isnan(smoothHandPos[handIdx][0])) {
+                        for (int i = 0; i < 21; i++) {
+                            smoothHandPos[handIdx][i*2]   = sx[i];
+                            smoothHandPos[handIdx][i*2+1] = sy[i];
+                        }
+                    } else {
+                        for (int i = 0; i < 21; i++) {
+                            smoothHandPos[handIdx][i*2]   += (sx[i]   - smoothHandPos[handIdx][i*2])   * alpha;
+                            smoothHandPos[handIdx][i*2+1] += (sy[i]   - smoothHandPos[handIdx][i*2+1]) * alpha;
+                        }
+                    }
 
                     uint8_t orange[3] = {0, 200, 255};   // BGR orange lines
                     uint8_t dotBlue[3] = {255, 100, 0};   // BGR blue dots
@@ -279,18 +325,21 @@ int main(int argc, char** argv) {
                         {13,17},{17,18},{18,19},{19,20},
                         {0,17},
                     };
+                    auto S = [&](int i) -> std::pair<int,int> {
+                        return { (int)smoothHandPos[handIdx][i*2], (int)smoothHandPos[handIdx][i*2+1] };
+                    };
                     for (auto& c : HAND_CONN) {
-                        auto [x0, y0] = toFrameScaled(c[0]);
-                        auto [x1, y1] = toFrameScaled(c[1]);
+                        auto [x0, y0] = S(c[0]);
+                        auto [x1, y1] = S(c[1]);
                         drawLine(annotated, x0, y0, x1, y1, orange, 2);
                     }
                     for (int i = 0; i < 21; i++) {
-                        auto [px, py] = toFrameScaled(i);
+                        auto [px, py] = S(i);
                         drawCircleFilled(annotated, px, py, 3, dotBlue);
                     }
                 };
-                drawHandSkeleton(handLeft);
-                drawHandSkeleton(handRight);
+                drawHandSkeleton(handLeft, 0);
+                drawHandSkeleton(handRight, 1);
             }
 
             {
