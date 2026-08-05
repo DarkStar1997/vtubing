@@ -158,6 +158,12 @@ int main(int argc, char** argv) {
                     int cx = wx + (int)(dirX * handRef * 0.3f);
                     int cy = wy + (int)(dirY * handRef * 0.3f);
                     int hrx = cx - hs / 2, hry = cy - hs / 2;
+                    // Skip if hand ROI is mostly out of frame — the model
+                    // would only see a partial hand and extrapolate landmarks
+                    // in wrong directions, causing weird elongation.
+                    int oob = std::max({0, -hrx, -hry,
+                                        hrx + hs - frame.width, hry + hs - frame.height});
+                    if (oob > hs * 0.4f) return;
                     HandResult h;
                     handTracker.detect(cropImage(frame, hrx, hry, hs, hs), h);
                     if (h.detected) {
@@ -253,6 +259,9 @@ int main(int argc, char** argv) {
                     // Hand length ≈ face height (stored in armLen field)
                     float expectedLen = (hr.armLen > 1.0f) ? hr.armLen : modelLen;
                     float scale = (modelLen > 1.0f) ? expectedLen / modelLen : 1.0f;
+                    // Clamp to prevent extreme stretching when the model
+                    // returns compressed landmarks (partial hand in frame).
+                    scale = std::clamp(scale, 0.8f, 1.5f);
 
                     auto toFrameScaled = [&](int i) {
                         float dx = (frameLm[i].first - frameLm[0].first) * scale;
