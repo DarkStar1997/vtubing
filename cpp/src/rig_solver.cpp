@@ -126,8 +126,10 @@ void RigSolver::update(const FaceResult& face, float dt) {
 }
 
 glm::quat RigSolver::dirToRotation(const glm::vec3& rest, const glm::vec3& target) {
+    float targetLen = glm::length(target);
+    if (targetLen < 1e-5f) return glm::quat(1, 0, 0, 0);
     glm::vec3 r = glm::normalize(rest);
-    glm::vec3 t = glm::normalize(target);
+    glm::vec3 t = target / targetLen;
     float dot = glm::clamp(glm::dot(r, t), -1.0f, 1.0f);
     float angle = std::acos(dot);
     // 3-degree deadzone
@@ -167,9 +169,11 @@ void RigSolver::updatePose(const PoseResult& pose, float dt) {
         return;
 
     // 2D pixel coords → VRM direction vectors.
+    // Image X must be negated: when facing a webcam, the person's left
+    // side is at high pixel X, but in VRM the avatar's left is at -X.
     // Image Y is down, VRM Y is up → negate Y. Z=0 (no depth from 2D).
     auto toVec = [&](int idx) -> glm::vec3 {
-        return {pose.kpX(idx), -pose.kpY(idx), 0.0f};
+        return {-pose.kpX(idx), -pose.kpY(idx), 0.0f};
     };
 
     glm::vec3 ls = toVec(PoseLandmarkIdx::L_SHOULDER);
@@ -179,13 +183,25 @@ void RigSolver::updatePose(const PoseResult& pose, float dt) {
     glm::vec3 lw = has(PoseLandmarkIdx::L_WRIST) ? toVec(PoseLandmarkIdx::L_WRIST) : le;
     glm::vec3 rw = has(PoseLandmarkIdx::R_WRIST) ? toVec(PoseLandmarkIdx::R_WRIST) : re;
 
-    // Upper arm rotations
-    glm::quat upperL = dirToRotation(REST_L, le - ls);
-    glm::quat upperR = dirToRotation(REST_R, re - rs);
+    // Upper arm rotations.
+    // Add a forward (-Z) bias proportional to how much the arm points
+    // downward. Without depth data (2D keypoints only), arms rotated to
+    // hang at the sides stay at their T-pose Z depth and get occluded by
+    // the torso. The forward tilt pushes them in front of the body.
+    auto addForwardBias = [](glm::vec3 dir) {
+        float d = glm::length(dir);
+        if (d < 1e-5f) return dir;
+        glm::vec3 n = dir / d;
+        float downwardness = std::max(0.0f, -n.y);
+        return glm::vec3(dir.x, dir.y, dir.z - 0.35f * downwardness * d);
+    };
+
+    glm::quat upperL = dirToRotation(REST_L, addForwardBias(le - ls));
+    glm::quat upperR = dirToRotation(REST_R, addForwardBias(re - rs));
 
     // Lower arm: world → local relative to upper arm
-    glm::quat lowerL_world = dirToRotation(REST_L, lw - le);
-    glm::quat lowerR_world = dirToRotation(REST_R, rw - re);
+    glm::quat lowerL_world = dirToRotation(REST_L, addForwardBias(lw - le));
+    glm::quat lowerR_world = dirToRotation(REST_R, addForwardBias(rw - re));
     glm::quat lowerL_local = glm::inverse(upperL) * lowerL_world;
     glm::quat lowerR_local = glm::inverse(upperR) * lowerR_world;
 

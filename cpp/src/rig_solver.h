@@ -110,9 +110,11 @@ private:
     static constexpr float MAX_PITCH = 20.0f;
     static constexpr float MAX_ROLL = 15.0f;
 
-    // Pose: rest directions for arms in VRM T-pose
-    static constexpr glm::vec3 REST_L = {1.0f, 0.0f, 0.0f};
-    static constexpr glm::vec3 REST_R = {-1.0f, 0.0f, 0.0f};
+    // Pose: rest directions for arms (from VRM bind pose)
+    // Verified: leftUpperArm→leftLowerArm extends in -X,
+    // rightUpperArm→rightLowerArm extends in +X.
+    static constexpr glm::vec3 REST_L = {-1.0f, 0.0f, 0.0f};
+    static constexpr glm::vec3 REST_R = {1.0f, 0.0f, 0.0f};
     // MediaPipe world → VRM: flip Z
     static constexpr glm::vec3 AXIS_FLIP = {1.0f, 1.0f, -1.0f};
 
