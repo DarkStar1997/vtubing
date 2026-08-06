@@ -271,9 +271,34 @@ std::vector<ProcessedMesh> processVerticesParallel(
     const glm::mat4& viewProj,
     const std::vector<float>& morphWeights,
     int fbWidth, int fbHeight,
-    int numThreads)
+    int numThreads,
+    float turnStrength,
+    bool leftIsFront)
 {
     std::vector<ProcessedMesh> result(model.meshes.size());
+
+    // Build arm-joint lookup early (needed for prim tagging + vertex bias)
+    std::vector<uint8_t> armSide(model.jointNodes.size(), 0);
+    for (size_t ji = 0; ji < model.jointNodes.size(); ji++) {
+        int cur = model.jointNodes[ji];
+        while (cur >= 0) {
+            const std::string& nm = model.nodes[cur].name;
+            bool isArm = nm.find("UpperArm") != std::string::npos ||
+                         nm.find("LowerArm") != std::string::npos ||
+                         nm.find("Hand") != std::string::npos;
+            if (isArm) {
+                // VRM 0.x uses "J_Bip_L_UpperArm" (single L/R letter),
+                // VRM 1.0 uses "leftUpperArm". Handle both.
+                bool isLeft = nm.find("left") != std::string::npos ||
+                              nm.find("Left") != std::string::npos ||
+                              nm.find("_L_") != std::string::npos ||
+                              nm.find("_L.") != std::string::npos;
+                armSide[ji] = isLeft ? 1 : 2;
+                break;
+            }
+            cur = model.nodes[cur].parent;
+        }
+    }
 
     // --- Phase 1: Pre-allocate + build flat arrays for cache-friendly access ---
     struct ActiveMorph { const float* deltas; float weight; };
@@ -306,6 +331,7 @@ std::vector<ProcessedMesh> processVerticesParallel(
             pp.worldNX.resize(vc);
             pp.worldNY.resize(vc);
             pp.worldNZ.resize(vc);
+            pp.armSideV.resize(vc);
 
             PrimInfo info;
             info.prim = &prim;
@@ -325,25 +351,7 @@ std::vector<ProcessedMesh> processVerticesParallel(
 
     const int numPrims = static_cast<int>(primsFlat.size());
     const glm::mat4* jm = jointMatrices.data();
-
-    // Build arm-joint lookup: vertices weighted to arm bones get a small
-    // depth bias so arms always render in front of the torso (prevents
-    // clipping when turned sideways and depth data is unreliable).
-    std::vector<uint8_t> isArmJoint(model.jointNodes.size(), 0);
-    for (size_t ji = 0; ji < model.jointNodes.size(); ji++) {
-        int cur = model.jointNodes[ji];
-        while (cur >= 0) {
-            const std::string& nm = model.nodes[cur].name;
-            if (nm.find("UpperArm") != std::string::npos ||
-                nm.find("LowerArm") != std::string::npos ||
-                nm.find("Hand") != std::string::npos) {
-                isArmJoint[ji] = 1;
-                break;
-            }
-            cur = model.nodes[cur].parent;
-        }
-    }
-    const uint8_t* armJ = isArmJoint.data();
+    const uint8_t* aSide = armSide.data();
 
     // --- Phase 2: Parallel vertex processing with lock-free work queue ---
     auto processPrimVertices = [&](const PrimInfo& info, int v) {
@@ -367,13 +375,20 @@ std::vector<ProcessedMesh> processVerticesParallel(
         skinned += (jm[j[3]] * hp) * wt[3];
 
         // Push arm vertices toward camera (-Z in model space) to prevent
-        // arm-through-torso clipping when depth data is unreliable.
-        float armW = 0;
-        if (armJ[j[0]]) armW += wt[0];
-        if (armJ[j[1]]) armW += wt[1];
-        if (armJ[j[2]]) armW += wt[2];
-        if (armJ[j[3]]) armW += wt[3];
-        if (armW > 0.3f) skinned.z -= 0.05f;  // 5cm forward
+        // arm-through-torso clipping. Front arm gets larger separation.
+        float leftW = 0, rightW = 0;
+        for (int b = 0; b < 4; b++) {
+            if (aSide[j[b]] == 1) leftW += wt[b];
+            else if (aSide[j[b]] == 2) rightW += wt[b];
+        }
+        float totalArm = leftW + rightW;
+        if (totalArm > 0.3f && turnStrength > 0.01f) {
+            float frontW = leftIsFront ? leftW : rightW;
+            skinned.z += frontW * -0.12f * turnStrength / totalArm;
+            pp.armSideV[v] = (frontW >= (totalArm - frontW)) ? 1 : 2;
+        } else {
+            pp.armSideV[v] = 0;
+        }
 
         glm::vec4 clip = viewProj * skinned;
         float w = clip.w;

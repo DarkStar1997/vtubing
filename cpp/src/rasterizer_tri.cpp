@@ -40,6 +40,12 @@ void rasterizeTri(
     }
     if (area < 0.01f) return;
 
+    // Debug tint: check per-vertex arm side flags
+    int armDbg = 0;
+    if (!pp.armSideV.empty()) {
+        armDbg = std::max({pp.armSideV[i0], pp.armSideV[i1], pp.armSideV[i2]});
+    }
+
     int ix0 = std::max(xMin, static_cast<int>(std::min({x0, x1, x2})));
     int ix1 = std::min(xMax, static_cast<int>(std::max({x0, x1, x2})));
     int iy0 = std::max(yMin, static_cast<int>(std::min({y0, y1, y2})));

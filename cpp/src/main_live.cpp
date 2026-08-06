@@ -47,6 +47,17 @@ int main(int argc, char** argv) {
     // Working copy that gets modified each frame
     std::vector<glm::mat4> jointMatrices = bindJointMatrices;
 
+    // Bone node indices for front-arm detection
+    int leftUpperArmNode = -1, rightUpperArmNode = -1;
+    {
+        auto it = model.boneNodes.find("leftUpperArm");
+        if (it != model.boneNodes.end()) leftUpperArmNode = it->second;
+        it = model.boneNodes.find("rightUpperArm");
+        if (it != model.boneNodes.end()) rightUpperArmNode = it->second;
+    }
+    bool leftIsFront = true;
+    float turnStrength = 0.0f;
+
     // Camera (same as main.cpp bbox-based framing)
     glm::vec3 bboxMin(1e9f), bboxMax(-1e9f);
     for (size_t mi = 0; mi < model.meshes.size(); mi++) {
@@ -395,6 +406,16 @@ int main(int argc, char** argv) {
                 std::vector<glm::mat4> modWorld =
                     computeWorldMatricesWithOverrides(model, overrides);
                 jointMatrices = computeJointMatrices(model, modWorld);
+
+                // Determine front arm from world Z of upper arm bones
+                if (leftUpperArmNode >= 0 && rightUpperArmNode >= 0) {
+                    float lz = modWorld[leftUpperArmNode][3].z;
+                    float rz = modWorld[rightUpperArmNode][3].z;
+                    float zDiff = lz - rz;
+                    if (zDiff < -0.02f) leftIsFront = true;
+                    else if (zDiff > 0.02f) leftIsFront = false;
+                    turnStrength = std::clamp((std::abs(zDiff) - 0.04f) / 0.06f, 0.0f, 1.0f);
+                }
             } else {
                 jointMatrices = bindJointMatrices;
             }
@@ -436,7 +457,8 @@ int main(int argc, char** argv) {
 
         // Render avatar
         auto proc = processVerticesParallel(model, jointMatrices, viewProj,
-                                            rigSolver.morphWeights(), renderW, renderH, numThreads);
+                                            rigSolver.morphWeights(), renderW, renderH, numThreads,
+                                             turnStrength, leftIsFront);
         ssfb.clear();
         rasterizeParallel(proc, ssfb, model.textures, numThreads);
         if (ss > 1) downsample2x2(ssfb, fb, numThreads);

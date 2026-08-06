@@ -235,16 +235,22 @@ void RigSolver::updatePose(const PoseResult& pose, float dt) {
     // BlazePose world-Z for arms is unreliable when turned sideways.
     // Without correction, Z sign can flip → arm rotates backward through torso.
     // Due to REST_L={1,0,0} vs bone-at-(-X): positive Z in direction → arm
-    // toward camera. Clamp Z to ensure forward component.
-    auto clampForwardZ = [](glm::vec3& d) {
-        float dl = glm::length(d);
-        if (dl > 1e-5f && d.z / dl < 0.08f)
-            d.z = 0.08f * dl;
-    };
-    clampForwardZ(uaL);
-    clampForwardZ(uaR);
-    clampForwardZ(laL);
-    clampForwardZ(laR);
+    // toward camera. Only apply Z clamp when avatar is turned sideways
+    // (shoulder Z depth difference exceeds threshold).
+    float shoulderZDiff = ls.z - rs.z;
+    float poseTurnStr = std::clamp((std::abs(shoulderZDiff) - 0.04f) / 0.06f, 0.0f, 1.0f);
+    if (poseTurnStr > 0.01f) {
+        float minZ = 0.08f * poseTurnStr;
+        auto clampForwardZ = [minZ](glm::vec3& d) {
+            float dl = glm::length(d);
+            if (dl > 1e-5f && d.z / dl < minZ)
+                d.z = minZ * dl;
+        };
+        clampForwardZ(uaL);
+        clampForwardZ(uaR);
+        clampForwardZ(laL);
+        clampForwardZ(laR);
+    }
 
     // Upper arm rotations: shoulder→elbow direction
     glm::quat upperL = dirToRotation(REST_L, uaL);

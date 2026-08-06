@@ -41,16 +41,16 @@ std::vector<glm::mat4> computeJointMatrices(
 // Process all vertices: morph + skin + MVP → screen space
 // Outputs: screenX[], screenY[], clipW[], uvOut[], textureIndex per prim
 struct ProcessedPrim {
-    // Per-vertex outputs (aligned for SIMD)
     std::vector<float> screenX;
     std::vector<float> screenY;
     std::vector<float> clipZ;
     std::vector<float> uvU;
     std::vector<float> uvV;
-    std::vector<float> worldNX;        // skinned world-space normal X (unnormalized)
+    std::vector<float> worldNX;
     std::vector<float> worldNY;
     std::vector<float> worldNZ;
     const MeshPrimitive* prim = nullptr;
+    std::vector<uint8_t> armSideV;  // per-vertex: 0=not arm, 1=front, 2=back
 };
 
 struct ProcessedMesh {
@@ -74,7 +74,9 @@ std::vector<ProcessedMesh> processVerticesParallel(
     const glm::mat4& viewProj,
     const std::vector<float>& morphWeights,
     int fbWidth, int fbHeight,
-    int numThreads);
+    int numThreads,
+    float turnStrength = 0.0f,
+    bool leftIsFront = true);
 
 // Parallel rasterization: splits framebuffer into horizontal bands
 void rasterizeParallel(
