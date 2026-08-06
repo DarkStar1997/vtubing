@@ -149,7 +149,6 @@ void rasterizeTri(
 
                 for (int px = pxStart; px <= pxEnd; px++) {
                     if (!depthTest || z < fb.depth[pixIdx]) {
-                        if (depthWrite) fb.depth[pixIdx] = z;
 
                         float nlen2 = nx*nx + ny*ny + nz*nz;
                         __m128 tmp = _mm_rsqrt_ss(_mm_set_ss(nlen2));
@@ -189,6 +188,7 @@ void rasterizeTri(
                         else if (alphaBlend && texAlpha <= 0.0f) writePixel = false;
 
                         if (writePixel) {
+                            if (depthWrite) fb.depth[pixIdx] = z;
                             float dotNK = nnx*KX + nny*KY + nnz*KZ;
                             float shK = (dotNK + rampBias) * rampScale;
                             if (shK < 0) shK = 0; else if (shK > 1) shK = 1;

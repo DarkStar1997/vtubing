@@ -226,13 +226,33 @@ void RigSolver::updatePose(const PoseResult& pose, float dt) {
     glm::vec3 lw = wl(PoseLandmarkIdx::L_WRIST);
     glm::vec3 rw = wl(PoseLandmarkIdx::R_WRIST);
 
+    // Arm direction vectors (already AXIS_FLIP'd via wl()).
+    glm::vec3 uaL = le - ls;  // upper arm L direction
+    glm::vec3 uaR = re - rs;  // upper arm R direction
+    glm::vec3 laL = lw - le;  // lower arm L direction
+    glm::vec3 laR = rw - re;  // lower arm R direction
+
+    // BlazePose world-Z for arms is unreliable when turned sideways.
+    // Without correction, Z sign can flip → arm rotates backward through torso.
+    // Due to REST_L={1,0,0} vs bone-at-(-X): positive Z in direction → arm
+    // toward camera. Clamp Z to ensure forward component.
+    auto clampForwardZ = [](glm::vec3& d) {
+        float dl = glm::length(d);
+        if (dl > 1e-5f && d.z / dl < 0.08f)
+            d.z = 0.08f * dl;
+    };
+    clampForwardZ(uaL);
+    clampForwardZ(uaR);
+    clampForwardZ(laL);
+    clampForwardZ(laR);
+
     // Upper arm rotations: shoulder→elbow direction
-    glm::quat upperL = dirToRotation(REST_L, le - ls);
-    glm::quat upperR = dirToRotation(REST_R, re - rs);
+    glm::quat upperL = dirToRotation(REST_L, uaL);
+    glm::quat upperR = dirToRotation(REST_R, uaR);
 
     // Lower arm: world→local relative to upper arm
-    glm::quat lowerL_world = dirToRotation(REST_L, lw - le);
-    glm::quat lowerR_world = dirToRotation(REST_R, rw - re);
+    glm::quat lowerL_world = dirToRotation(REST_L, laL);
+    glm::quat lowerR_world = dirToRotation(REST_R, laR);
     glm::quat lowerL_local = glm::inverse(upperL) * lowerL_world;
     glm::quat lowerR_local = glm::inverse(upperR) * lowerR_world;
 

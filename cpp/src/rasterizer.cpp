@@ -326,6 +326,25 @@ std::vector<ProcessedMesh> processVerticesParallel(
     const int numPrims = static_cast<int>(primsFlat.size());
     const glm::mat4* jm = jointMatrices.data();
 
+    // Build arm-joint lookup: vertices weighted to arm bones get a small
+    // depth bias so arms always render in front of the torso (prevents
+    // clipping when turned sideways and depth data is unreliable).
+    std::vector<uint8_t> isArmJoint(model.jointNodes.size(), 0);
+    for (size_t ji = 0; ji < model.jointNodes.size(); ji++) {
+        int cur = model.jointNodes[ji];
+        while (cur >= 0) {
+            const std::string& nm = model.nodes[cur].name;
+            if (nm.find("UpperArm") != std::string::npos ||
+                nm.find("LowerArm") != std::string::npos ||
+                nm.find("Hand") != std::string::npos) {
+                isArmJoint[ji] = 1;
+                break;
+            }
+            cur = model.nodes[cur].parent;
+        }
+    }
+    const uint8_t* armJ = isArmJoint.data();
+
     // --- Phase 2: Parallel vertex processing with lock-free work queue ---
     auto processPrimVertices = [&](const PrimInfo& info, int v) {
         const MeshPrimitive& prim = *info.prim;
@@ -346,6 +365,15 @@ std::vector<ProcessedMesh> processVerticesParallel(
         skinned += (jm[j[1]] * hp) * wt[1];
         skinned += (jm[j[2]] * hp) * wt[2];
         skinned += (jm[j[3]] * hp) * wt[3];
+
+        // Push arm vertices toward camera (-Z in model space) to prevent
+        // arm-through-torso clipping when depth data is unreliable.
+        float armW = 0;
+        if (armJ[j[0]]) armW += wt[0];
+        if (armJ[j[1]]) armW += wt[1];
+        if (armJ[j[2]]) armW += wt[2];
+        if (armJ[j[3]]) armW += wt[3];
+        if (armW > 0.3f) skinned.z -= 0.05f;  // 5cm forward
 
         glm::vec4 clip = viewProj * skinned;
         float w = clip.w;
