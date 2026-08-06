@@ -70,6 +70,21 @@ int main(int argc, char** argv) {
     struct CamParams { float targetY; float dist; float fov; };
     CamParams sitCam{centre.y + size.y * 0.28f, std::max(size.y * 0.85f, 1.1f), 28.0f};
     CamParams standCam{centre.y, (size.y * 1.1f) / (2.0f * std::tan(glm::radians(15.0f))), 30.0f};
+
+    // Pre-compute body geometry for dynamic camera (matching Python avatar.js)
+    float headBoneY = centre.y + size.y * 0.45f;
+    float hipsBoneY = centre.y;
+    {
+        int headIdx = model.headNodeIndex;
+        if (headIdx >= 0) headBoneY = bindWorldMatrices[headIdx][3].y;
+        auto hipsIt = model.boneNodes.find("hips");
+        if (hipsIt != model.boneNodes.end())
+            hipsBoneY = bindWorldMatrices[hipsIt->second][3].y;
+    }
+    float modelH = size.y;
+    float shoulderBoneY = headBoneY - modelH * 0.05f;
+    float torsoUnit = std::abs(hipsBoneY - shoulderBoneY);
+    float feetY = bboxMin.y;
     float aspect = (float)fbWidth / fbHeight;
     float curFov = sitCam.fov;
     float curTargetY = sitCam.targetY;
@@ -101,6 +116,9 @@ int main(int argc, char** argv) {
     SDL_Surface* winSurface = SDL_GetWindowSurface(window);
 
     bool showPiP = true, calibrating = false;
+    bool framingApplied = false;
+    float calibFaceMinY = 1.0f, calibFaceMaxY = 0.0f;
+    int calibFaceFrames = 0;
     SDL_Event event;
     Image lastAnnotated;  // cached PiP frame, reused between webcam updates
     Image pipImg;         // pre-resized PiP (updated at webcam rate, not render rate)
@@ -283,9 +301,35 @@ int main(int argc, char** argv) {
                 if (calibrating) {
                     rigSolver.calibrate(faceResult);
                     rigSolver.calibratePose();
+                    // Collect face framing data (normalized Y coords)
+                    float y1 = faceResult.bboxY1 / 480.0f;
+                    float y2 = faceResult.bboxY2 / 480.0f;
+                    calibFaceMinY = std::min(calibFaceMinY, y1);
+                    calibFaceMaxY = std::max(calibFaceMaxY, y2);
+                    calibFaceFrames++;
                     if (rigSolver.calibrated() && rigSolver.poseCalibrated()) {
                         calibrating = false;
                         fprintf(stderr, "[live] Calibration complete.\n");
+                        // Compute framing-calibrated sitCam (matching Python avatar.js)
+                        if (!framingApplied && calibFaceFrames > 0) {
+                            float userFaceH = calibFaceMaxY - calibFaceMinY;
+                            float userFaceCenterY = (calibFaceMinY + calibFaceMaxY) * 0.5f;
+                            float modelFaceH = modelH * 0.13f;
+                            float modelFaceCenter = headBoneY + modelH * 0.035f;
+                            float fov = 28.0f;
+                            float tanHalf = std::tan(glm::radians(fov * 0.5f));
+                            sitCam.dist = modelFaceH / (std::max(userFaceH, 0.01f) * 2.0f * tanHalf);
+                            sitCam.targetY = modelFaceCenter + (2.0f * userFaceCenterY - 1.0f) * sitCam.dist * tanHalf;
+                            sitCam.fov = fov;
+                            curFov = sitCam.fov;
+                            curTargetY = sitCam.targetY;
+                            curDist = sitCam.dist;
+                            framingApplied = true;
+                            fprintf(stderr, "[cam] Framing applied: userFaceH=%.2f center=%.2f "
+                                    "→ sitCam(ty=%.2f,d=%.2f,fov=%.0f)\n",
+                                    userFaceH, userFaceCenterY,
+                                    sitCam.targetY, sitCam.dist, sitCam.fov);
+                        }
                     }
                 }
                 rigSolver.update(faceResult, trackDt);
@@ -356,16 +400,32 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Dynamic camera: blend sit-cam (bust shot) ↔ stand-cam (full body)
+        // Dynamic camera: blend sit-cam (bust shot) ↔ body-fit cam
+        // matching Python avatar.js applyDynamicCamera()
         {
             const BodyPose& bp = rigSolver.bodyPose();
-            float frac = bp.valid ? bp.standing : 0.0f;
-            if (bp.valid && bp.bodyExtent > 0.5f)
-                frac = std::min(1.0f, frac + (bp.bodyExtent - 0.5f) * 0.3f);
+            float standing = bp.valid ? bp.standing : 0.0f;
+            float be = bp.valid ? bp.bodyExtent : 0.0f;
+            // Standing but no body extent → assume full body visible
+            if (be < 0.1f && standing > 0.5f) be = 3.5f;
+
+            // Body-fit camera: frames head-top to visible-body-bottom
+            float modelBottomY = shoulderBoneY - be * torsoUnit;
+            modelBottomY = std::max(modelBottomY, feetY);
+            float headTopY = headBoneY + modelH * 0.06f;
+            float bodyH = headTopY - modelBottomY;
+            float bfCenterY = (headTopY + modelBottomY) * 0.5f;
+            float bfFov = 30.0f;
+            float bfDist = std::max(
+                (bodyH * 1.1f) / (2.0f * std::tan(glm::radians(bfFov * 0.5f))), 0.8f);
+
+            // Blend sit-cam ↔ body-fit cam
+            float frac = std::min(standing + std::max(0.0f, be - 0.5f) * 0.3f, 1.0f);
             float sit = 1.0f - frac;
-            float newFov = sitCam.fov * sit + standCam.fov * frac;
-            float newTargetY = sitCam.targetY * sit + standCam.targetY * frac;
-            float newDist = sitCam.dist * sit + standCam.dist * frac;
+            float newFov = sitCam.fov * sit + bfFov * frac;
+            float newTargetY = sitCam.targetY * sit + bfCenterY * frac;
+            float newDist = sitCam.dist * sit + bfDist * frac;
+
             // Smooth transitions
             float camAlpha = std::min(1.0f, dt * 3.0f);
             curFov += (newFov - curFov) * camAlpha;

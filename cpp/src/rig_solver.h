@@ -59,6 +59,11 @@ private:
     float torsoNeutral_ = 0, spineYNeutral_ = 0, spineZNeutral_ = 0;
     bool poseCalibrated_ = false;
 
+    // Standing detection: hysteresis + smoothing (matching Python pipeline)
+    bool standState_ = false;
+    OneEuroFilter standingFilter_{0.4f, 0.0f};
+    OneEuroFilter bodyExtentFilter_{0.8f, 0.0f};
+
     std::array<float, 52> neutralBs_{};
     float neutralYaw_ = 0, neutralPitch_ = 0, neutralRoll_ = 0;
     int calibFrames_ = 0;

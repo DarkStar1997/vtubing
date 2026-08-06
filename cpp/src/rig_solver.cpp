@@ -180,9 +180,13 @@ void RigSolver::updatePose(const PoseResult& pose, float dt) {
         bodyPose_.lean *= decay;
         bodyPose_.twist *= decay;
         bodyPose_.lateral *= decay;
+        bodyPose_.standing *= decay;
+        bodyPose_.bodyExtent *= decay;
         torsoFilter_.reset();
         spineYFilter_.reset();
         spineZFilter_.reset();
+        standingFilter_.reset();
+        bodyExtentFilter_.reset();
         for (int i = 0; i < 8; i++)
             for (int j = 0; j < 3; j++)
                 poseRotFilters_[i][j].reset();
@@ -251,31 +255,44 @@ void RigSolver::updatePose(const PoseResult& pose, float dt) {
     bodyPose_.twist = rawY;
     bodyPose_.lateral = rawZ;
 
-    // Standing detection from lower body landmark visibility
-    float lowerVis = (pose.lmVis(PoseLandmarkIdx::L_KNEE) +
-                      pose.lmVis(PoseLandmarkIdx::R_KNEE) +
-                      pose.lmVis(PoseLandmarkIdx::L_ANKLE) +
-                      pose.lmVis(PoseLandmarkIdx::R_ANKLE)) / 4.0f;
-    bodyPose_.standing = lowerVis > 0.3f ? 1.0f : 0.0f;
+    // Standing detection: hip visibility with hysteresis (matching Python)
+    // Enter stand at hip_vis > 0.50, exit at hip_vis < 0.30
+    // Also require hips to be in-frame (normalized Y < 0.95)
+    float hipVisL = (pose.lmVis(PoseLandmarkIdx::L_HIP) > 0.3f &&
+                     pose.lmY(PoseLandmarkIdx::L_HIP) < 0.95f)
+                    ? pose.lmVis(PoseLandmarkIdx::L_HIP) : 0.0f;
+    float hipVisR = (pose.lmVis(PoseLandmarkIdx::R_HIP) > 0.3f &&
+                     pose.lmY(PoseLandmarkIdx::R_HIP) < 0.95f)
+                    ? pose.lmVis(PoseLandmarkIdx::R_HIP) : 0.0f;
+    float hipVis = (hipVisL + hipVisR) * 0.5f;
+    if (standState_)
+        standState_ = hipVis < 0.30f ? false : true;
+    else
+        standState_ = hipVis > 0.50f ? true : false;
+    bodyPose_.standing = standingFilter_.filter(standState_ ? 1.0f : 0.0f, dt);
 
-    // Body extent: how many torso-lengths of body are visible
+    // Body extent: how many torso-lengths of body are visible below shoulders
+    // Uses IMAGE-space normalized Y (0=top, 1=bottom) matching Python pipeline.
+    //   0 = just shoulders, 1 = to hips, 2 = to knees, 3+ = to ankles
+    float rawExtent = 0.0f;
+    float shImgY = (pose.lmY(PoseLandmarkIdx::L_SHOULDER) +
+                    pose.lmY(PoseLandmarkIdx::R_SHOULDER)) * 0.5f;
     if (pose.lmVis(PoseLandmarkIdx::L_HIP) > 0.3f &&
         pose.lmVis(PoseLandmarkIdx::R_HIP) > 0.3f) {
-        glm::vec3 lh = wl(PoseLandmarkIdx::L_HIP);
-        glm::vec3 rh = wl(PoseLandmarkIdx::R_HIP);
-        float shoulderMidY = (ls.y + rs.y) * 0.5f;
-        float hipMidY = (lh.y + rh.y) * 0.5f;
-        float torsoUnit = std::abs(shoulderMidY - hipMidY);
-        if (torsoUnit > 1e-5f) {
-            float lowestY = shoulderMidY;
-            for (int idx : {PoseLandmarkIdx::L_KNEE, PoseLandmarkIdx::R_KNEE,
-                            PoseLandmarkIdx::L_ANKLE, PoseLandmarkIdx::R_ANKLE}) {
-                if (pose.lmVis(idx) > 0.3f)
-                    lowestY = std::min(lowestY, pose.wlY(idx));
-            }
-            bodyPose_.bodyExtent = (shoulderMidY - lowestY) / torsoUnit;
+        float hipImgY = (pose.lmY(PoseLandmarkIdx::L_HIP) +
+                         pose.lmY(PoseLandmarkIdx::R_HIP)) * 0.5f;
+        float torsoUnit = std::max(hipImgY - shImgY, 0.01f);
+        float lowestImgY = shImgY;
+        for (int idx : {PoseLandmarkIdx::L_ANKLE, PoseLandmarkIdx::R_ANKLE,
+                        PoseLandmarkIdx::L_KNEE, PoseLandmarkIdx::R_KNEE,
+                        PoseLandmarkIdx::L_HIP, PoseLandmarkIdx::R_HIP}) {
+            if (pose.lmVis(idx) > 0.3f && pose.lmY(idx) < 0.95f &&
+                pose.lmY(idx) > lowestImgY)
+                lowestImgY = pose.lmY(idx);
         }
+        rawExtent = (lowestImgY - shImgY) / torsoUnit;
     }
+    bodyPose_.bodyExtent = bodyExtentFilter_.filter(rawExtent, dt);
 
     bodyPose_.valid = true;
 }
