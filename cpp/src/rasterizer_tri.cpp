@@ -35,6 +35,8 @@ void rasterizeTri(
         std::swap(u1, u2); std::swap(v1uv, v2uv);
         std::swap(n1x, n2x); std::swap(n1y, n2y); std::swap(n1z, n2z);
         area = -area;
+    } else if (!prim.doubleSided) {
+        return;  // Back-face culling for single-sided materials
     }
     if (area < 0.01f) return;
 

@@ -29,6 +29,12 @@ RigSolver::RigSolver(const VRMModel& model) {
         groupToMorphs_[key] = binds;
     }
 
+    // Blinks (ARKit indices 9=eyeBlinkLeft, 10=eyeBlinkRight) are very fast
+    // events (100-300ms). The default 1 Hz filter only reaches ~17% per frame
+    // → eyelids barely close. Use a high cutoff for near-instant response.
+    bsFilters_[9] = OneEuroFilter(20.0f, 0.0f, 10.0f);
+    bsFilters_[10] = OneEuroFilter(20.0f, 0.0f, 10.0f);
+
     // Resolve finger bone node indices from VRM humanoid bones
     // Finger names: {side}{Finger}{Joint}
     // side: left/right, Finger: Thumb/Index/Middle/Ring/Little
@@ -120,7 +126,7 @@ void RigSolver::update(const FaceResult& face, float dt) {
     roll = rollFilter_.filter(roll, dt);
 
     glm::quat qYaw = glm::angleAxis(glm::radians(yaw), glm::vec3(0, 1, 0));
-    glm::quat qPitch = glm::angleAxis(glm::radians(pitch), glm::vec3(1, 0, 0));
+    glm::quat qPitch = glm::angleAxis(glm::radians(-pitch), glm::vec3(1, 0, 0));
     glm::quat qRoll = glm::angleAxis(glm::radians(roll), glm::vec3(0, 0, 1));
     headRot_ = qYaw * qPitch * qRoll;
 }
@@ -212,7 +218,7 @@ void RigSolver::updatePose(const PoseResult& pose, float dt) {
             rawLean = std::atan2(-d.z, vert);
         rawLean = torsoFilter_.filter(rawLean, dt);
         if (poseCalibrated_) rawLean -= torsoNeutral_;
-        bodyPose_.lean = -rawLean;
+        bodyPose_.lean = rawLean;
     }
 
     // Spine lateral bend + twist from shoulder line
@@ -318,15 +324,9 @@ void RigSolver::updateHands(const HandResult& left, const HandResult& right, flo
                 } else {
                     // Other fingers: Z-axis rotation
                     handOverrides_[nodeIdx] = glm::angleAxis(flex * zSign, glm::vec3(0, 0, 1));
+                }
+            }
         }
-    }
-
-    // Blinks (ARKit indices 9=eyeBlinkLeft, 10=eyeBlinkRight) are very fast
-    // events (100-300ms). The default 1 Hz filter only reaches ~17% per frame
-    // → eyelids barely close. Use a high cutoff for near-instant response.
-    bsFilters_[9] = OneEuroFilter(20.0f, 0.0f, 10.0f);
-    bsFilters_[10] = OneEuroFilter(20.0f, 0.0f, 10.0f);
-}
 
         // Palm twist on hand bone (X-axis)
         if (handBoneNodes_[side] >= 0) {

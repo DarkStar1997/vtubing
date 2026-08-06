@@ -164,6 +164,106 @@ void MpPoseLandmarkerCloseResult(struct MpPoseLandmarkerResult* result);
 
 MpStatus MpPoseLandmarkerClose(MpPoseLandmarkerPtr landmarker, char** error_msg);
 
+/* ---- Category (classification output) ---- */
+struct MpCategory {
+    int index;
+    float score;
+    char* category_name;
+    char* display_name;
+};
+
+struct MpCategories {
+    struct MpCategory* categories;
+    uint32_t categories_count;
+};
+
+/* ---- Matrix (column-major, OpenGL convention) ---- */
+struct MpMatrix {
+    uint32_t rows;
+    uint32_t cols;
+    float* data;
+};
+
+/* ---- Face landmarker ---- */
+typedef struct MpFaceLandmarkerInternal* MpFaceLandmarkerPtr;
+
+struct MpFaceLandmarkerOptions {
+    struct MpBaseOptions base_options;
+    MpRunningMode running_mode;
+    int num_faces;
+    float min_face_detection_confidence;
+    float min_face_presence_confidence;
+    float min_tracking_confidence;
+    bool output_face_blendshapes;
+    bool output_facial_transformation_matrixes;
+    typedef void (*result_callback_fn)(MpStatus status,
+                                       const struct MpFaceLandmarkerResult* result,
+                                       const MpImagePtr image,
+                                       int64_t timestamp_ms);
+    result_callback_fn result_callback;
+};
+
+struct MpFaceLandmarkerResult {
+    struct MpNormalizedLandmarks* face_landmarks;
+    uint32_t face_landmarks_count;
+    struct MpCategories* face_blendshapes;
+    uint32_t face_blendshapes_count;
+    struct MpMatrix* facial_transformation_matrixes;
+    uint32_t facial_transformation_matrixes_count;
+};
+
+MpStatus MpFaceLandmarkerCreate(
+    struct MpFaceLandmarkerOptions* options,
+    MpFaceLandmarkerPtr* landmarker_out, char** error_msg);
+
+MpStatus MpFaceLandmarkerDetectForVideo(
+    MpFaceLandmarkerPtr landmarker, MpImagePtr image,
+    const MpImageProcessingOptions* options, int64_t timestamp_ms,
+    struct MpFaceLandmarkerResult* result, char** error_msg);
+
+void MpFaceLandmarkerCloseResult(struct MpFaceLandmarkerResult* result);
+
+MpStatus MpFaceLandmarkerClose(MpFaceLandmarkerPtr landmarker, char** error_msg);
+
+/* ---- Hand landmarker ---- */
+typedef struct MpHandLandmarkerInternal* MpHandLandmarkerPtr;
+
+struct MpHandLandmarkerOptions {
+    struct MpBaseOptions base_options;
+    MpRunningMode running_mode;
+    int num_hands;
+    float min_hand_detection_confidence;
+    float min_hand_presence_confidence;
+    float min_tracking_confidence;
+    typedef void (*result_callback_fn)(MpStatus status,
+                                       const struct MpHandLandmarkerResult* result,
+                                       const MpImagePtr image,
+                                       int64_t timestamp_ms);
+    result_callback_fn result_callback;
+};
+
+struct MpHandLandmarkerResult {
+    struct MpCategories* handedness;
+    uint32_t handedness_count;
+    struct MpNormalizedLandmarks* hand_landmarks;
+    uint32_t hand_landmarks_count;
+    struct MpLandmarks* hand_world_landmarks;
+    uint32_t hand_world_landmarks_count;
+};
+
+MpStatus MpHandLandmarkerCreate(
+    struct MpHandLandmarkerOptions* options,
+    MpHandLandmarkerPtr* landmarker_out, char** error_msg);
+
+MpStatus MpHandLandmarkerDetectForVideo(
+    MpHandLandmarkerPtr landmarker, MpImagePtr image,
+    const MpImageProcessingOptions* options, int64_t timestamp_ms,
+    struct MpHandLandmarkerResult* result, char** error_msg);
+
+void MpHandLandmarkerCloseResult(struct MpHandLandmarkerResult* result);
+
+MpStatus MpHandLandmarkerClose(MpHandLandmarkerPtr landmarker, char** error_msg);
+
 void MpErrorFree(char* error_message);
 
 #ifdef __cplusplus

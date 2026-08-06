@@ -1,269 +1,135 @@
 #include "face_tracker.h"
-#include <algorithm>
+#include <cstdio>
 #include <cstring>
+#include <algorithm>
 
 FaceTracker::FaceTracker(const std::string& modelDir) {
-    detector_ = std::make_unique<OnnxSession>(modelDir + "/face_detection_short_range.onnx");
-    landmarker_ = std::make_unique<OnnxSession>(modelDir + "/face_landmarker.onnx");
-    blendshape_ = std::make_unique<OnnxSession>(modelDir + "/face_blendshapes.onnx");
-    generateAnchors();
-}
+    std::string modelPath = modelDir + "/face_landmarker.task";
 
-void FaceTracker::generateAnchors() {
-    // MediaPipe SSD anchors for BlazeFace 128×128
-    // strides = [8, 16, 16, 16], grouped by stride
-    int strides[] = {8, 16, 16, 16};
-    int idx = 0, anchorIdx = 0;
-    while (idx < 4) {
-        int last = idx;
-        while (last < 4 && strides[last] == strides[idx]) last++;
-        int repeats = 2 * (last - idx);
-        int cells = 128 / strides[idx];
-        for (int y = 0; y < cells; y++) {
-            for (int x = 0; x < cells; x++) {
-                float cx = (x + 0.5f) / cells;
-                float cy = (y + 0.5f) / cells;
-                for (int r = 0; r < repeats; r++) {
-                    anchors_[anchorIdx * 2] = cx;
-                    anchors_[anchorIdx * 2 + 1] = cy;
-                    anchorIdx++;
-                }
-            }
-        }
-        idx = last;
+    struct MpFaceLandmarkerOptions opts;
+    std::memset(&opts, 0, sizeof(opts));
+    opts.base_options.model_asset_path = modelPath.c_str();
+    opts.base_options.delegate = MP_DELEGATE_CPU;
+    opts.running_mode = MP_RUNNING_MODE_VIDEO;
+    opts.num_faces = 1;
+    opts.min_face_detection_confidence = 0.5f;
+    opts.min_face_presence_confidence = 0.5f;
+    opts.min_tracking_confidence = 0.5f;
+    opts.output_face_blendshapes = true;
+    opts.output_facial_transformation_matrixes = true;
+    opts.result_callback = nullptr;
+
+    char* errorMsg = nullptr;
+    MpStatus st = MpFaceLandmarkerCreate(&opts, &landmarker_, &errorMsg);
+    if (st != kMpOk) {
+        fprintf(stderr, "[face] MpFaceLandmarkerCreate failed: %s\n",
+                errorMsg ? errorMsg : "(unknown)");
+        if (errorMsg) MpErrorFree(errorMsg);
+        landmarker_ = nullptr;
     }
 }
 
-Image FaceTracker::letterbox(const Image& src, int size, float& scale, float& padX, float& padY) {
-    int h = src.height, w = src.width;
-    scale = (float)size / std::max(h, w);
-    padX = (size - w * scale) / 2.0f;
-    padY = (size - h * scale) / 2.0f;
-    float M[6] = {scale, 0, padX, 0, scale, padY};
-    return warpAffine(src, M, size, size);
-}
-
-std::vector<FaceTracker::Detection> FaceTracker::runDetector(const Image& bgr, int imgW, int imgH) {
-    float scale, padX, padY;
-    Image canvas = letterbox(bgr, 128, scale, padX, padY);
-
-    // Preprocess: BGR→RGB, normalize [-1,1], transpose CHW
-    std::vector<float> blob(3 * 128 * 128);
-    for (int y = 0; y < 128; y++) {
-        for (int x = 0; x < 128; x++) {
-            const uint8_t* px = canvas.ptr(y, x);
-            blob[0 * 128 * 128 + y * 128 + x] = (px[2] - 127.5f) / 127.5f; // R
-            blob[1 * 128 * 128 + y * 128 + x] = (px[1] - 127.5f) / 127.5f; // G
-            blob[2 * 128 * 128 + y * 128 + x] = (px[0] - 127.5f) / 127.5f; // B
-        }
+FaceTracker::~FaceTracker() {
+    if (landmarker_) {
+        char* errorMsg = nullptr;
+        MpFaceLandmarkerClose(landmarker_, &errorMsg);
+        if (errorMsg) MpErrorFree(errorMsg);
     }
-
-    auto outputs = detector_->run(blob.data(), blob.size());
-    // regressors: [1, 896, 16], scores: [1, 896, 1]
-    auto& regs = outputs[0];  // 896*16
-    auto& scs = outputs[1];   // 896*1
-
-    float threshold = 0.5f;
-    auto unletterbox = [&](float nx, float ny) {
-        return std::make_pair(
-            (nx * 128.0f - padX) / scale,
-            (ny * 128.0f - padY) / scale);
-    };
-
-    std::vector<Detection> dets;
-    for (int i = 0; i < 896; i++) {
-        float logit = scs[i];
-        float score = 1.0f / (1.0f + std::exp(-logit));
-        if (score < threshold) continue;
-
-        Detection d;
-        d.score = score;
-        float ax = anchors_[i * 2], ay = anchors_[i * 2 + 1];
-        d.cx = regs[i * 16 + 0] / 128.0f + ax;
-        d.cy = regs[i * 16 + 1] / 128.0f + ay;
-        d.w = regs[i * 16 + 2] / 128.0f;
-        d.h = regs[i * 16 + 3] / 128.0f;
-        for (int k = 0; k < 6; k++) {
-            d.kp[k][0] = regs[i * 16 + 4 + 2 * k] / 128.0f + ax;
-            d.kp[k][1] = regs[i * 16 + 5 + 2 * k] / 128.0f + ay;
-        }
-        dets.push_back(d);
-    }
-    return weightedNms(dets);
-}
-
-std::vector<FaceTracker::Detection> FaceTracker::weightedNms(std::vector<Detection>& dets) {
-    if (dets.empty()) return {};
-
-    std::sort(dets.begin(), dets.end(), [](const auto& a, const auto& b) {
-        return a.score > b.score;
-    });
-
-    std::vector<Detection> output;
-    std::vector<bool> suppressed(dets.size(), false);
-
-    for (size_t i = 0; i < dets.size(); i++) {
-        if (suppressed[i]) continue;
-        Detection blended = dets[i];
-        float weightSum = dets[i].score;
-
-        for (size_t j = i + 1; j < dets.size(); j++) {
-            if (suppressed[j]) continue;
-            float iou;
-            {
-                float ix1 = std::max(blended.cx - blended.w / 2, dets[j].cx - dets[j].w / 2);
-                float iy1 = std::max(blended.cy - blended.h / 2, dets[j].cy - dets[j].h / 2);
-                float ix2 = std::min(blended.cx + blended.w / 2, dets[j].cx + dets[j].w / 2);
-                float iy2 = std::min(blended.cy + blended.h / 2, dets[j].cy + dets[j].h / 2);
-                float iw = std::max(0.0f, ix2 - ix1);
-                float ih = std::max(0.0f, iy2 - iy1);
-                float inter = iw * ih;
-                float uni = blended.w * blended.h + dets[j].w * dets[j].h - inter;
-                iou = inter / std::max(uni, 1e-9f);
-            }
-            if (iou > 0.3f) {
-                suppressed[j] = true;
-                float w = dets[j].score;
-                blended.cx = (blended.cx * weightSum + dets[j].cx * w) / (weightSum + w);
-                blended.cy = (blended.cy * weightSum + dets[j].cy * w) / (weightSum + w);
-                blended.w = (blended.w * weightSum + dets[j].w * w) / (weightSum + w);
-                blended.h = (blended.h * weightSum + dets[j].h * w) / (weightSum + w);
-                for (int k = 0; k < 6; k++) {
-                    blended.kp[k][0] = (blended.kp[k][0] * weightSum + dets[j].kp[k][0] * w) / (weightSum + w);
-                    blended.kp[k][1] = (blended.kp[k][1] * weightSum + dets[j].kp[k][1] * w) / (weightSum + w);
-                }
-                weightSum += w;
-            }
-        }
-        output.push_back(blended);
-    }
-    return output;
 }
 
 void FaceTracker::detect(const Image& bgr, FaceResult& result) {
     result.detected = false;
-    int imgW = bgr.width, imgH = bgr.height;
+    if (!landmarker_ || bgr.empty()) return;
 
-    // 1. Run BlazeFace detector
-    auto dets = runDetector(bgr, imgW, imgH);
-    if (dets.empty()) return;
+    int w = bgr.width, h = bgr.height;
 
-    auto& det = dets[0]; // take highest-score face
-
-    // 2. ROI extraction: square, 1.5× scale, rotated by eye angle
-    // Un-letterbox detection from 128px normalized to full image coords
-    float scale, padX, padY;
-    {
-        int h = bgr.height, w = bgr.width;
-        scale = 128.0f / std::max(h, w);
-        padX = (128 - w * scale) / 2.0f;
-        padY = (128 - h * scale) / 2.0f;
+    // MediaPipe expects RGB; our Image is BGR → swap channels
+    std::vector<uint8_t> rgb(w * h * 3);
+    for (int i = 0; i < w * h; i++) {
+        rgb[i * 3 + 0] = bgr.data[i * 3 + 2];  // R
+        rgb[i * 3 + 1] = bgr.data[i * 3 + 1];  // G
+        rgb[i * 3 + 2] = bgr.data[i * 3 + 0];  // B
     }
 
-    auto unletterbox = [&](float nx, float ny) {
-        return std::make_pair(
-            (nx * 128.0f - padX) / scale,
-            (ny * 128.0f - padY) / scale);
-    };
-
-    auto [fullCx, fullCy] = unletterbox(det.cx, det.cy);
-    float fullW = det.w * 128.0f / scale;
-    float fullH = det.h * 128.0f / scale;
-    float margin = 0.25f;
-    float fullSide = (1.0f + 2.0f * margin) * std::max(fullW, fullH);
-
-    // Keypoints to full image coords (for rotation angle)
-    float kpFull[6][2];
-    for (int k = 0; k < 6; k++) {
-        auto [kx, ky] = unletterbox(det.kp[k][0], det.kp[k][1]);
-        kpFull[k][0] = kx;
-        kpFull[k][1] = ky;
+    MpImagePtr image = nullptr;
+    char* errorMsg = nullptr;
+    MpStatus st = MpImageCreateFromUint8Data(
+        kMpImageFormatSrgb, w, h, rgb.data(), (int)rgb.size(),
+        &image, &errorMsg);
+    if (st != kMpOk || !image) {
+        if (errorMsg) MpErrorFree(errorMsg);
+        return;
     }
 
-    // ROI rotation angle from eye keypoints (row 1 - row 0 = right - left eye)
-    float dx = kpFull[1][0] - kpFull[0][0];
-    float dy = kpFull[1][1] - kpFull[0][1];
-    float angle = std::atan2(dy, dx) * 180.0f / 3.14159265f;
+    MpFaceLandmarkerResult mpResult;
+    std::memset(&mpResult, 0, sizeof(mpResult));
 
-    // 3. Warp ROI to 256×256
-    int modelSize = 256;
-    float rotM[6];
-    getRotationMatrix2D(fullCx, fullCy, angle, (float)modelSize / fullSide, rotM);
-    rotM[2] += (float)modelSize / 2.0f - fullCx;
-    rotM[5] += (float)modelSize / 2.0f - fullCy;
+    timestampMs_ += 33;
+    st = MpFaceLandmarkerDetectForVideo(
+        landmarker_, image, nullptr, timestampMs_, &mpResult, &errorMsg);
 
-    Image crop = warpAffine(bgr, rotM, modelSize, modelSize);
+    MpImageFree(image);
 
-    // Inverse affine for landmark un-projection
-    float invM[6];
-    invertAffine(rotM, invM);
+    if (st != kMpOk) {
+        if (errorMsg) MpErrorFree(errorMsg);
+        return;
+    }
 
-    // 4. Preprocess crop: BGR→RGB, normalize [0,1], transpose CHW
-    std::vector<float> meshBlob(3 * modelSize * modelSize);
-    for (int y = 0; y < modelSize; y++) {
-        for (int x = 0; x < modelSize; x++) {
-            const uint8_t* px = crop.ptr(y, x);
-            meshBlob[0 * modelSize * modelSize + y * modelSize + x] = px[2] / 255.0f; // R
-            meshBlob[1 * modelSize * modelSize + y * modelSize + x] = px[1] / 255.0f; // G
-            meshBlob[2 * modelSize * modelSize + y * modelSize + x] = px[0] / 255.0f; // B
+    // Extract normalized landmarks → pixel coords
+    if (mpResult.face_landmarks_count > 0) {
+        const auto& nlm = mpResult.face_landmarks[0];
+        int n = (int)nlm.landmarks_count;
+        if (n > 478) n = 478;
+        result.detected = true;
+        result.score = 1.0f;
+
+        float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
+        for (int i = 0; i < n; i++) {
+            const auto& lm = nlm.landmarks[i];
+            float px = lm.x * w;
+            float py = lm.y * h;
+            result.landmarks[i * 3] = px;
+            result.landmarks[i * 3 + 1] = py;
+            result.landmarks[i * 3 + 2] = lm.z * w;
+            minX = std::min(minX, px); maxX = std::max(maxX, px);
+            minY = std::min(minY, py); maxY = std::max(maxY, py);
         }
+        // Pad bbox slightly
+        float padX = (maxX - minX) * 0.05f;
+        float padY = (maxY - minY) * 0.05f;
+        result.bboxX1 = minX - padX;
+        result.bboxY1 = minY - padY;
+        result.bboxX2 = maxX + padX;
+        result.bboxY2 = maxY + padY;
     }
 
-    // 5. Run FaceLandmarker
-    auto meshOut = landmarker_->run(meshBlob.data(), meshBlob.size());
-    // landmarks: [1, 478, 3], score: [1, 1]
-    auto& lms = meshOut[0];
-    float presenceScore = 1.0f / (1.0f + std::exp(-meshOut[1][0]));
-
-    if (presenceScore < 0.5f) return;
-
-    result.detected = true;
-    result.score = presenceScore;
-
-    // 6. Un-project landmarks to full image coords
-    for (int i = 0; i < 478; i++) {
-        float lx = lms[i * 3], ly = lms[i * 3 + 1], lz = lms[i * 3 + 2];
-        // Apply inverse affine to x,y
-        float fx = invM[0] * lx + invM[1] * ly + invM[2];
-        float fy = invM[3] * lx + invM[4] * ly + invM[5];
-        // Scale z to image pixel scale
-        float fz = lz * fullSide / modelSize;
-        result.landmarks[i * 3] = fx;
-        result.landmarks[i * 3 + 1] = fy;
-        result.landmarks[i * 3 + 2] = fz;
+    // Extract 52 blendshapes
+    if (mpResult.face_blendshapes_count > 0) {
+        const auto& cats = mpResult.face_blendshapes[0];
+        int n = (int)cats.categories_count;
+        if (n > 52) n = 52;
+        for (int i = 0; i < n; i++)
+            result.blendshapes[i] = cats.categories[i].score;
     }
 
-    // 7. BlendshapeV2: select 146 indices, denormalize to pixel coords
-    std::vector<float> bsInput(146 * 2);
-    for (int i = 0; i < 146; i++) {
-        int idx = kBlendshapeIdxs[i];
-        bsInput[i * 2] = result.landmarks[idx * 3];
-        bsInput[i * 2 + 1] = result.landmarks[idx * 3 + 1];
+    // Extract head rotation from 4×4 facial transformation matrix.
+    // Matrix is column-major (OpenGL/GLM convention).
+    // Decompose as YXZ intrinsic Euler: [yaw, pitch, roll] in degrees.
+    if (mpResult.facial_transformation_matrixes_count > 0) {
+        const auto& mat = mpResult.facial_transformation_matrixes[0];
+        const float* d = mat.data;
+        // R[row][col] = d[col*4 + row]  (column-major)
+        float r02 = d[8], r10 = d[1], r11 = d[5], r12 = d[9], r22 = d[10];
+        float pitch = std::asin(std::clamp(-r12, -1.0f, 1.0f));
+        float roll  = std::atan2(r10, r11);
+        float yaw   = std::atan2(r02, r22);
+        // Negate yaw: non-mirrored camera (matches Python pipeline)
+        yaw = -yaw;
+        // Store in degrees
+        result.yaw   = yaw   * 180.0f / 3.14159265f;
+        result.pitch = pitch * 180.0f / 3.14159265f;
+        result.roll  = roll  * 180.0f / 3.14159265f;
     }
 
-    auto bsOut = blendshape_->run(bsInput.data(), bsInput.size());
-    std::memcpy(result.blendshapes.data(), bsOut[0].data(), sizeof(float) * 52);
-
-    // 8. Head pose estimation (simplified — not full solvePnP)
-    // Roll from eye line angle (landmarks 33=left eye, 263=right eye)
-    float lex = result.landmarks[33 * 3], ley = result.landmarks[33 * 3 + 1];
-    float rex = result.landmarks[263 * 3], rey = result.landmarks[263 * 3 + 1];
-    result.roll = std::atan2(rey - ley, rex - lex);
-
-    // Pitch from nose tip vertical position relative to face height
-    float noseY = result.landmarks[1 * 3 + 1];
-    float foreheadY = result.landmarks[10 * 3 + 1];
-    float chinY = result.landmarks[152 * 3 + 1];
-    float faceH = chinY - foreheadY;
-    if (faceH > 1.0f) {
-        float noseRel = (noseY - foreheadY) / faceH;  // ~0.5 neutral
-        result.pitch = (noseRel - 0.5f) * 1.5f;  // simplified
-    }
-    result.yaw = 0;  // TODO: proper solvePnP
-
-    // Bounding box
-    result.bboxX1 = fullCx - fullW / 2;
-    result.bboxY1 = fullCy - fullH / 2;
-    result.bboxX2 = fullCx + fullW / 2;
-    result.bboxY2 = fullCy + fullH / 2;
+    MpFaceLandmarkerCloseResult(&mpResult);
 }

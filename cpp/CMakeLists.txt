@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(vtuber_cpu LANGUAGES CXX)
+project(vtuber_cpu LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -43,12 +43,9 @@ file(DOWNLOAD
     ${THIRD_PARTY_DIR}/stb_image_write.h
     STATUS stbw_status)
 
-# --- ONNX Runtime (pre-built) ---
-file(GLOB ORT_DIR "${THIRD_PARTY_DIR}/onnxruntime-linux-x64-*")
-if(NOT ORT_DIR)
-    message(FATAL_ERROR "ONNX Runtime not found in ${THIRD_PARTY_DIR}. Download onnxruntime-linux-x64-1.28.0.tgz and extract.")
-endif()
-message(STATUS "ONNX Runtime: ${ORT_DIR}")
+# --- MediaPipe C API (pre-built shared library) ---
+set(MP_LIB ${CMAKE_CURRENT_SOURCE_DIR}/lib/libmediapipe.so)
+
 
 # --- Shared rendering sources (used by both targets) ---
 set(RENDER_SOURCES
@@ -72,34 +69,31 @@ target_link_libraries(vtuber_cpu PRIVATE SDL3::SDL3 glm::glm)
 target_compile_options(vtuber_cpu PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-mavx2 -mfma -mbmi2>)
 
-# --- Live tracking target (webcam + ONNX inference + real-time render) ---
+# --- Live tracking target (webcam + MediaPipe inference + real-time render) ---
 add_executable(vtuber_live
     src/main_live.cpp
     src/webcam.cpp
-    src/onnx_session.cpp
     src/face_tracker.cpp
     src/pose_tracker.cpp
     src/hand_tracker.cpp
     src/rig_solver.cpp
+    src/egl_stub.c
     ${RENDER_SOURCES})
 
 target_include_directories(vtuber_live PRIVATE
     src
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${THIRD_PARTY_DIR}
-    ${bs_thread_pool_SOURCE_DIR}/include
-    ${ORT_DIR}/include)
+    ${bs_thread_pool_SOURCE_DIR}/include)
+
+target_link_options(vtuber_live PRIVATE -rdynamic)
 
 target_link_libraries(vtuber_live PRIVATE
     SDL3::SDL3 glm::glm
-    onnxruntime
-    ${CMAKE_CURRENT_SOURCE_DIR}/lib/libmediapipe.so)
+    ${MP_LIB})
 
-target_link_directories(vtuber_live PRIVATE ${ORT_DIR}/lib)
-
-# RPATH so the binary finds libonnxruntime.so and libmediapipe.so at runtime
 set_target_properties(vtuber_live PROPERTIES
-    BUILD_RPATH "${ORT_DIR}/lib;${CMAKE_CURRENT_SOURCE_DIR}/lib"
+    BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/lib"
     INSTALL_RPATH "$ORIGIN")
 
 target_compile_options(vtuber_live PRIVATE
@@ -108,7 +102,6 @@ target_compile_options(vtuber_live PRIVATE
 # --- Test tracker target (static image inference) ---
 add_executable(test_tracker
     src/test_tracker.cpp
-    src/onnx_session.cpp
     src/face_tracker.cpp
     src/rig_solver.cpp
     ${RENDER_SOURCES})
@@ -117,15 +110,12 @@ target_include_directories(test_tracker PRIVATE
     src
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${THIRD_PARTY_DIR}
-    ${bs_thread_pool_SOURCE_DIR}/include
-    ${ORT_DIR}/include)
+    ${bs_thread_pool_SOURCE_DIR}/include)
 
 target_link_libraries(test_tracker PRIVATE
     glm::glm
-    onnxruntime)
-
-target_link_directories(test_tracker PRIVATE ${ORT_DIR}/lib)
+    ${MP_LIB})
 
 set_target_properties(test_tracker PROPERTIES
-    BUILD_RPATH "${ORT_DIR}/lib"
+    BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/lib"
     INSTALL_RPATH "$ORIGIN")
