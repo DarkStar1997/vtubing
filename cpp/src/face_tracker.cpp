@@ -14,7 +14,7 @@ FaceTracker::FaceTracker(const std::string& modelDir) {
     opts.num_faces = 1;
     opts.min_face_detection_confidence = 0.5f;
     opts.min_face_presence_confidence = 0.5f;
-    opts.min_tracking_confidence = 0.5f;
+    opts.min_tracking_confidence = 0.1f;
     opts.output_face_blendshapes = true;
     opts.output_facial_transformation_matrixes = true;
     opts.result_callback = nullptr;

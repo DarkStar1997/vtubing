@@ -89,6 +89,10 @@ void RigSolver::update(const FaceResult& face, float dt) {
     if (!calibrated_ || !face.detected) {
         float decay = std::exp(-dt / 0.2f);
         for (auto& w : morphWeights_) w *= decay;
+        headRot_ = glm::slerp(headRot_, glm::quat(1, 0, 0, 0), 1.0f - decay);
+        yawFilter_.reset();
+        pitchFilter_.reset();
+        rollFilter_.reset();
         return;
     }
 
@@ -168,14 +172,22 @@ void RigSolver::calibratePose() {
 }
 
 void RigSolver::updatePose(const PoseResult& pose, float dt) {
-    if (!calibrated_ || !pose.detected) {
-        return;  // keep last valid pose
-    }
-
-    // Check shoulder visibility (minimum requirement)
-    if (pose.lmVis(PoseLandmarkIdx::L_SHOULDER) < 0.3f ||
-        pose.lmVis(PoseLandmarkIdx::R_SHOULDER) < 0.3f)
+    if (!calibrated_ || !pose.detected ||
+        pose.lmVis(PoseLandmarkIdx::L_SHOULDER) < 0.3f ||
+        pose.lmVis(PoseLandmarkIdx::R_SHOULDER) < 0.3f) {
+        // Decay body pose toward neutral and reset filters
+        float decay = std::exp(-dt / 0.3f);
+        bodyPose_.lean *= decay;
+        bodyPose_.twist *= decay;
+        bodyPose_.lateral *= decay;
+        torsoFilter_.reset();
+        spineYFilter_.reset();
+        spineZFilter_.reset();
+        for (int i = 0; i < 8; i++)
+            for (int j = 0; j < 3; j++)
+                poseRotFilters_[i][j].reset();
         return;
+    }
 
     // Helper: world landmark → VRM direction (apply AXIS_FLIP)
     auto wl = [&](int idx) -> glm::vec3 {
@@ -218,7 +230,7 @@ void RigSolver::updatePose(const PoseResult& pose, float dt) {
             rawLean = std::atan2(-d.z, vert);
         rawLean = torsoFilter_.filter(rawLean, dt);
         if (poseCalibrated_) rawLean -= torsoNeutral_;
-        bodyPose_.lean = rawLean;
+        bodyPose_.lean = std::clamp(rawLean, -0.15f, 0.15f);
     }
 
     // Spine lateral bend + twist from shoulder line

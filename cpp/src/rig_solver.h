@@ -47,7 +47,7 @@ private:
     std::vector<int> meshMorphBase_;
 
     std::array<OneEuroFilter, 52> bsFilters_;
-    OneEuroFilter yawFilter_{1.5f, 0.05f}, pitchFilter_{1.5f, 0.05f}, rollFilter_{1.5f, 0.05f};
+    OneEuroFilter yawFilter_{4.0f, 0.15f}, pitchFilter_{4.0f, 0.15f}, rollFilter_{4.0f, 0.15f};
 
     // Pose filters: rotation vectors (3 per bone) for arms + spine
     OneEuroFilter poseRotFilters_[8][3] = {{
