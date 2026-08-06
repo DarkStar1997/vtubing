@@ -82,7 +82,7 @@ int main(int argc, char** argv) {
     }
 
     FaceTracker faceTracker(modelDir);
-    PoseTracker poseTracker(modelDir + "/rtmo-s.onnx");
+    PoseTracker poseTracker(modelDir);
     HandTracker handTracker(modelDir + "/hand_landmarker.onnx");
     RigSolver rigSolver(model);
 
@@ -139,12 +139,7 @@ int main(int argc, char** argv) {
             PoseResult pose;
             poseTracker.detect(frame, pose);
 
-            // Hand tracking: crop ROIs from RTMO's accurate wrist positions.
-            // ROI size and annotation scale use face height as the reference
-            // (hand length ≈ face height — a proportion robust to forearm
-            // foreshortening, which makes armLen unreliable when arms point
-            // toward the camera). ROI is shifted toward the fingertips so
-            // the full hand is captured.
+            // Hand tracking: crop ROIs from BlazePose wrist positions.
             HandResult handLeft, handRight;
             if (pose.detected) {
                 float faceHeight = result.detected
@@ -152,26 +147,23 @@ int main(int argc, char** argv) {
                 float handRef = faceHeight > 0.0f ? faceHeight : 150.0f;
 
                 // Suppress hand tracking when wrists are close enough that
-                // the ROIs would overlap. The landmarker can't distinguish
-                // overlapping hands (it was trained on single-hand detector
-                // crops) and returns unreliable/garbage landmarks.
+                // the ROIs would overlap.
                 bool canTrackHands = true;
-                if (pose.kpScore(PoseLandmarkIdx::L_WRIST) > 0.3f &&
-                    pose.kpScore(PoseLandmarkIdx::R_WRIST) > 0.3f) {
-                    float wdx = pose.kpX(PoseLandmarkIdx::L_WRIST) - pose.kpX(PoseLandmarkIdx::R_WRIST);
-                    float wdy = pose.kpY(PoseLandmarkIdx::L_WRIST) - pose.kpY(PoseLandmarkIdx::R_WRIST);
+                if (pose.lmVis(PoseLandmarkIdx::L_WRIST) > 0.3f &&
+                    pose.lmVis(PoseLandmarkIdx::R_WRIST) > 0.3f) {
+                    float wdx = pose.frameX(PoseLandmarkIdx::L_WRIST) - pose.frameX(PoseLandmarkIdx::R_WRIST);
+                    float wdy = pose.frameY(PoseLandmarkIdx::L_WRIST) - pose.frameY(PoseLandmarkIdx::R_WRIST);
                     float wristSep = std::sqrt(wdx*wdx + wdy*wdy);
                     if (wristSep < handRef * 1.2f) canTrackHands = false;
                 }
 
                 auto detectHand = [&](int wristIdx, int elbowIdx, HandResult& outResult) {
-                    if (pose.kpScore(wristIdx) < 0.3f) return;
-                    int wx = (int)pose.kpX(wristIdx);
-                    int wy = (int)pose.kpY(wristIdx);
-                    // Shift ROI center toward fingertips (away from elbow)
+                    if (pose.lmVis(wristIdx) < 0.3f) return;
+                    int wx = (int)pose.frameX(wristIdx);
+                    int wy = (int)pose.frameY(wristIdx);
                     float dirX = 0, dirY = 0;
-                    if (pose.kpScore(elbowIdx) > 0.3f) {
-                        float ex = pose.kpX(elbowIdx), ey = pose.kpY(elbowIdx);
+                    if (pose.lmVis(elbowIdx) > 0.3f) {
+                        float ex = pose.frameX(elbowIdx), ey = pose.frameY(elbowIdx);
                         float armLen = std::sqrt((wx-ex)*(wx-ex) + (wy-ey)*(wy-ey));
                         if (armLen > 1.0f) { dirX = (wx-ex)/armLen; dirY = (wy-ey)/armLen; }
                     }
@@ -230,25 +222,26 @@ int main(int argc, char** argv) {
                     }
                 }
                 if (pose.detected) {
-                    // RTMO keypoints are already in original frame pixel coords
                     uint8_t cyan[3] = {255, 255, 0};
                     static const int POSE_CONN[][2] = {
-                        {5,6},{5,7},{7,9},{6,8},{8,10},
-                        {5,11},{6,12},{11,12},
-                        {11,13},{13,15},{12,14},{14,16},
+                        {11,12},{11,13},{13,15},{12,14},{14,16},
+                        {11,23},{12,24},{23,24},
+                        {23,25},{25,27},{24,26},{26,28},
+                        {27,29},{29,31},{28,30},{30,32},
+                        {15,17},{15,19},{15,21},{16,18},{16,20},{16,22},
                     };
                     for (auto& c : POSE_CONN) {
-                        if (pose.kpScore(c[0]) > 0.15f && pose.kpScore(c[1]) > 0.15f) {
+                        if (pose.lmVis(c[0]) > 0.15f && pose.lmVis(c[1]) > 0.15f) {
                             drawLine(annotated,
-                                (int)pose.kpX(c[0]), (int)pose.kpY(c[0]),
-                                (int)pose.kpX(c[1]), (int)pose.kpY(c[1]),
+                                (int)pose.frameX(c[0]), (int)pose.frameY(c[0]),
+                                (int)pose.frameX(c[1]), (int)pose.frameY(c[1]),
                                 cyan, 2);
                         }
                     }
                     uint8_t dotColor[3] = {0, 0, 255};
-                    for (int i = 0; i < 17; i++) {
-                        if (pose.kpScore(i) > 0.15f)
-                            drawCircleFilled(annotated, (int)pose.kpX(i), (int)pose.kpY(i), 3, dotColor);
+                    for (int i = 0; i < 33; i++) {
+                        if (pose.lmVis(i) > 0.15f)
+                            drawCircleFilled(annotated, (int)pose.frameX(i), (int)pose.frameY(i), 3, dotColor);
                     }
                 }
                 // Hand skeleton
@@ -453,11 +446,20 @@ int main(int argc, char** argv) {
                     if (it != model.boneNodes.end() && q != glm::quat(1, 0, 0, 0))
                         overrides[it->second] = q;
                 };
-                setIf("spine", bp.spine);
                 setIf("leftUpperArm", bp.leftUpperArm);
                 setIf("rightUpperArm", bp.rightUpperArm);
                 setIf("leftLowerArm", bp.leftLowerArm);
                 setIf("rightLowerArm", bp.rightLowerArm);
+                // Spine: distribute lean/twist/lateral across upperChest, chest, spine
+                auto setEuler = [&](const std::string& bone, float s) {
+                    auto it = model.boneNodes.find(bone);
+                    if (it != model.boneNodes.end())
+                        overrides[it->second] = glm::quat(
+                            glm::vec3(bp.lean * s, bp.twist * s, bp.lateral * s));
+                };
+                setEuler("upperChest", 0.5f);
+                setEuler("chest", 0.3f);
+                setEuler("spine", 0.2f);
             } else if (rigSolver.calibrated()) {
                 // Rest arm pose: A-pose (relaxed) when sitting
                 auto setRot = [&](const std::string& bone, float x, float y, float z) {

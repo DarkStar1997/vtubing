@@ -26,6 +26,9 @@ assets/models/*.onnx
 # ONNX Runtime (pre-built, downloaded separately)
 cpp/third_party/onnxruntime-linux-x64-*/
 
+# MediaPipe C library (copied from Python package)
+cpp/lib/
+
 # Output artifacts
 /output/
 *.mp4

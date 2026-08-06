@@ -16,9 +16,11 @@ struct BodyPose {
     glm::quat rightUpperArm = glm::quat(1, 0, 0, 0);
     glm::quat leftLowerArm = glm::quat(1, 0, 0, 0);
     glm::quat rightLowerArm = glm::quat(1, 0, 0, 0);
-    glm::quat spine = glm::quat(1, 0, 0, 0);
+    float lean = 0.0f;     // X-axis: forward lean
+    float twist = 0.0f;    // Y-axis: torso twist
+    float lateral = 0.0f;  // Z-axis: lateral bend
     float standing = 0.0f;    // 0=sitting, 1=standing
-    float bodyExtent = 0.0f;  // torso-lengths of body visible (0=shoulders, 1=hips, 2=knees, 3+ ankles)
+    float bodyExtent = 0.0f;  // torso-lengths of body visible
 };
 
 class RigSolver {
@@ -110,12 +112,10 @@ private:
     static constexpr float MAX_PITCH = 20.0f;
     static constexpr float MAX_ROLL = 15.0f;
 
-    // Pose: rest directions for arms (from VRM bind pose)
-    // Verified: leftUpperArm→leftLowerArm extends in -X,
-    // rightUpperArm→rightLowerArm extends in +X.
-    static constexpr glm::vec3 REST_L = {-1.0f, 0.0f, 0.0f};
-    static constexpr glm::vec3 REST_R = {1.0f, 0.0f, 0.0f};
-    // MediaPipe world → VRM: flip Z
+    // Pose: rest directions for arms (matching Python pipeline)
+    // Python: REST_L=[1,0,0], REST_R=[-1,0,0], AXIS_FLIP=[1,1,-1]
+    static constexpr glm::vec3 REST_L = {1.0f, 0.0f, 0.0f};
+    static constexpr glm::vec3 REST_R = {-1.0f, 0.0f, 0.0f};
     static constexpr glm::vec3 AXIS_FLIP = {1.0f, 1.0f, -1.0f};
 
     glm::quat dirToRotation(const glm::vec3& rest, const glm::vec3& target);

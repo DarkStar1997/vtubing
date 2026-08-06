@@ -85,19 +85,21 @@ add_executable(vtuber_live
 
 target_include_directories(vtuber_live PRIVATE
     src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${THIRD_PARTY_DIR}
     ${bs_thread_pool_SOURCE_DIR}/include
     ${ORT_DIR}/include)
 
 target_link_libraries(vtuber_live PRIVATE
     SDL3::SDL3 glm::glm
-    onnxruntime)
+    onnxruntime
+    ${CMAKE_CURRENT_SOURCE_DIR}/lib/libmediapipe.so)
 
 target_link_directories(vtuber_live PRIVATE ${ORT_DIR}/lib)
 
-# RPATH so the binary finds libonnxruntime.so at runtime
+# RPATH so the binary finds libonnxruntime.so and libmediapipe.so at runtime
 set_target_properties(vtuber_live PROPERTIES
-    BUILD_RPATH "${ORT_DIR}/lib"
+    BUILD_RPATH "${ORT_DIR}/lib;${CMAKE_CURRENT_SOURCE_DIR}/lib"
     INSTALL_RPATH "$ORIGIN")
 
 target_compile_options(vtuber_live PRIVATE
@@ -113,6 +115,7 @@ add_executable(test_tracker
 
 target_include_directories(test_tracker PRIVATE
     src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${THIRD_PARTY_DIR}
     ${bs_thread_pool_SOURCE_DIR}/include
     ${ORT_DIR}/include)

@@ -1,86 +1,107 @@
 #include "pose_tracker.h"
-#include <algorithm>
+#include <cstdio>
+#include <cstring>
 
-PoseTracker::PoseTracker(const std::string& modelPath) {
-    session_ = std::make_unique<OnnxSession>(modelPath);
+PoseTracker::PoseTracker(const std::string& modelDir) {
+    std::string modelPath = modelDir + "/pose_landmarker_full.task";
+
+    struct MpPoseLandmarkerOptions opts;
+    std::memset(&opts, 0, sizeof(opts));
+    opts.base_options.model_asset_path = modelPath.c_str();
+    opts.base_options.delegate = MP_DELEGATE_CPU;
+    opts.running_mode = MP_RUNNING_MODE_VIDEO;
+    opts.num_poses = 1;
+    opts.min_pose_detection_confidence = 0.5f;
+    opts.min_pose_presence_confidence = 0.5f;
+    opts.min_tracking_confidence = 0.5f;
+    opts.output_segmentation_masks = false;
+    opts.result_callback = nullptr;
+
+    char* errorMsg = nullptr;
+    MpStatus st = MpPoseLandmarkerCreate(&opts, &landmarker_, &errorMsg);
+    if (st != kMpOk) {
+        fprintf(stderr, "[pose] MpPoseLandmarkerCreate failed: %s\n",
+                errorMsg ? errorMsg : "(unknown)");
+        if (errorMsg) MpErrorFree(errorMsg);
+        landmarker_ = nullptr;
+    }
+}
+
+PoseTracker::~PoseTracker() {
+    if (landmarker_) {
+        char* errorMsg = nullptr;
+        MpPoseLandmarkerClose(landmarker_, &errorMsg);
+        if (errorMsg) MpErrorFree(errorMsg);
+    }
 }
 
 void PoseTracker::detect(const Image& bgr, PoseResult& result) {
     result.detected = false;
-    if (bgr.empty()) return;
+    if (!landmarker_ || bgr.empty()) return;
 
-    const int S = INPUT_SIZE;  // 640
-
-    // Letterbox: resize maintaining aspect ratio, pad to S×S.
-    // RTMO expects raw [0,255] BGR (no /255 normalization), gray (114) padding,
-    // top-left alignment (matching rtmlib's preprocessing).
-    float scale = (float)S / std::max(bgr.width, bgr.height);
-    int newW = (int)(bgr.width * scale);
-    int newH = (int)(bgr.height * scale);
-    const int PAD = 114;
-
-    Image resized = resizeBilinear(bgr, newW, newH);
-    Image canvas(S, S, bgr.channels);
-    for (size_t i = 0; i < canvas.data.size(); i++) canvas.data[i] = PAD;
-    for (int y = 0; y < newH; y++) {
-        const uint8_t* src = resized.ptr(y, 0);
-        uint8_t* dst = canvas.ptr(y, 0);
-        memcpy(dst, src, newW * bgr.channels);
+    // MediaPipe expects RGB; our Image is BGR → swap channels
+    int w = bgr.width, h = bgr.height;
+    std::vector<uint8_t> rgb(w * h * 3);
+    for (int i = 0; i < w * h; i++) {
+        rgb[i * 3 + 0] = bgr.data[i * 3 + 2];  // R
+        rgb[i * 3 + 1] = bgr.data[i * 3 + 1];  // G
+        rgb[i * 3 + 2] = bgr.data[i * 3 + 0];  // B
     }
 
-    // Preprocess: NCHW float32, raw [0,255] BGR (RTMO does its own normalization)
-    std::vector<float> blob(3 * S * S);
-    for (int y = 0; y < S; y++) {
-        for (int x = 0; x < S; x++) {
-            const uint8_t* px = canvas.ptr(y, x);
-            blob[(0 * S + y) * S + x] = (float)px[2];  // R
-            blob[(1 * S + y) * S + x] = (float)px[1];  // G
-            blob[(2 * S + y) * S + x] = (float)px[0];  // B
+    MpImagePtr image = nullptr;
+    char* errorMsg = nullptr;
+    MpStatus st = MpImageCreateFromUint8Data(
+        kMpImageFormatSrgb, w, h, rgb.data(), (int)rgb.size(),
+        &image, &errorMsg);
+    if (st != kMpOk || !image) {
+        if (errorMsg) MpErrorFree(errorMsg);
+        return;
+    }
+
+    MpPoseLandmarkerResult mpResult;
+    std::memset(&mpResult, 0, sizeof(mpResult));
+
+    timestampMs_ += 33;  // ~30fps
+    st = MpPoseLandmarkerDetectForVideo(
+        landmarker_, image, nullptr, timestampMs_, &mpResult, &errorMsg);
+
+    MpImageFree(image);
+
+    if (st != kMpOk) {
+        if (errorMsg) MpErrorFree(errorMsg);
+        return;
+    }
+
+    // Extract landmarks (single pose expected)
+    if (mpResult.pose_landmarks_count > 0 && mpResult.pose_world_landmarks_count > 0) {
+        const auto& nlm = mpResult.pose_landmarks[0];
+        const auto& wlm = mpResult.pose_world_landmarks[0];
+
+        int n = (int)nlm.landmarks_count;
+        if (n > PoseLandmarkIdx::NUM) n = PoseLandmarkIdx::NUM;
+        for (int i = 0; i < n; i++) {
+            const auto& lm = nlm.landmarks[i];
+            result.landmarks[i * 5 + 0] = lm.x;
+            result.landmarks[i * 5 + 1] = lm.y;
+            result.landmarks[i * 5 + 2] = lm.z;
+            result.landmarks[i * 5 + 3] = lm.visibility;
+            result.landmarks[i * 5 + 4] = lm.presence;
         }
-    }
 
-    auto outputs = session_->run(blob.data(), blob.size());
-    if (outputs.size() < 2) return;
-
-    // Output[0]: dets [1, N, 5] — cx, cy, w, h, score (in 640×640 pixel space)
-    // Output[1]: keypoints [1, N, 17, 3] — x, y, score (in 640×640 pixel space)
-    auto& dets = outputs[0];
-    auto& kps = outputs[1];
-
-    int nPersons = (int)dets.size() / 5;
-    if (nPersons == 0) return;
-
-    // Find best person
-    int bestIdx = 0;
-    float bestScore = dets[4];
-    for (int i = 1; i < nPersons; i++) {
-        if (dets[i * 5 + 4] > bestScore) {
-            bestScore = dets[i * 5 + 4];
-            bestIdx = i;
+        int wn = (int)wlm.landmarks_count;
+        if (wn > PoseLandmarkIdx::NUM) wn = PoseLandmarkIdx::NUM;
+        for (int i = 0; i < wn; i++) {
+            const auto& lm = wlm.landmarks[i];
+            result.worldLandmarks[i * 3 + 0] = lm.x;
+            result.worldLandmarks[i * 3 + 1] = lm.y;
+            result.worldLandmarks[i * 3 + 2] = lm.z;
         }
+
+        result.detected = true;
+        result.frameW = w;
+        result.frameH = h;
+        result.presence = nlm.landmarks[0].presence;
     }
 
-    if (bestScore < 0.3f) return;
-
-    result.detected = true;
-    result.score = bestScore;
-
-    // Un-letterbox: top-left padding means resized image starts at (0,0) in
-    // canvas, so un-projection is just value/scale back to original frame pixels.
-    auto unlbX = [&](float v) { return v / scale; };
-    auto unlbY = [&](float v) { return v / scale; };
-
-    // Bounding box
-    result.bboxX = unlbX(dets[bestIdx * 5 + 0]);
-    result.bboxY = unlbY(dets[bestIdx * 5 + 1]);
-    result.bboxW = dets[bestIdx * 5 + 2] / scale;
-    result.bboxH = dets[bestIdx * 5 + 3] / scale;
-
-    // Keypoints
-    const float* kpBase = kps.data() + bestIdx * PoseLandmarkIdx::NUM * 3;
-    for (int i = 0; i < PoseLandmarkIdx::NUM; i++) {
-        result.keypoints[i * 3 + 0] = unlbX(kpBase[i * 3 + 0]);
-        result.keypoints[i * 3 + 1] = unlbY(kpBase[i * 3 + 1]);
-        result.keypoints[i * 3 + 2] = kpBase[i * 3 + 2];
-    }
+    MpPoseLandmarkerCloseResult(&mpResult);
 }
