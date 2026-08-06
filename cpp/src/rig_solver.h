@@ -47,12 +47,14 @@ private:
     std::vector<int> meshMorphBase_;
 
     std::array<OneEuroFilter, 52> bsFilters_;
-    OneEuroFilter yawFilter_{4.0f, 0.15f}, pitchFilter_{4.0f, 0.15f}, rollFilter_{4.0f, 0.15f};
+    OneEuroFilter yawFilter_{2.0f, 0.15f}, pitchFilter_{2.0f, 0.15f}, rollFilter_{2.0f, 0.15f};
+
+    // Spring smoothers for gentle ease-in/ease-out on top of OneEuro filtering
+    SmoothFloat smoothYaw_{0.06f}, smoothPitch_{0.06f}, smoothRoll_{0.06f};
 
     // Pose filters: rotation vectors (3 per bone) for arms + spine
-    OneEuroFilter poseRotFilters_[8][3] = {{
-        {1.0f, 0.05f}, {1.0f, 0.05f}, {1.0f, 0.05f}
-    }};
+    OneEuroFilter poseRotFilters_[8][3];
+    SmoothFloat smoothRot_[8][3];
     OneEuroFilter torsoFilter_{1.0f, 0.0f};
     OneEuroFilter spineYFilter_{1.0f, 0.0f};
     OneEuroFilter spineZFilter_{1.0f, 0.0f};

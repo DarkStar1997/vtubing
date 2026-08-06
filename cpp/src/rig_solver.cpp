@@ -29,6 +29,14 @@ RigSolver::RigSolver(const VRMModel& model) {
         groupToMorphs_[key] = binds;
     }
 
+    // Pose rotation filters: lower min_cutoff for gentle small movements,
+    // beta for responsive large movements.
+    for (int i = 0; i < 8; i++)
+        for (int j = 0; j < 3; j++) {
+            poseRotFilters_[i][j] = OneEuroFilter(0.8f, 0.05f);
+            smoothRot_[i][j] = SmoothFloat(0.1f);
+        }
+
     // Blinks (ARKit indices 9=eyeBlinkLeft, 10=eyeBlinkRight) are very fast
     // events (100-300ms). The default 1 Hz filter only reaches ~17% per frame
     // → eyelids barely close. Use a high cutoff for near-instant response.
@@ -93,6 +101,9 @@ void RigSolver::update(const FaceResult& face, float dt) {
         yawFilter_.reset();
         pitchFilter_.reset();
         rollFilter_.reset();
+        smoothYaw_.reset();
+        smoothPitch_.reset();
+        smoothRoll_.reset();
         return;
     }
 
@@ -129,6 +140,10 @@ void RigSolver::update(const FaceResult& face, float dt) {
     pitch = pitchFilter_.filter(pitch, dt);
     roll = rollFilter_.filter(roll, dt);
 
+    yaw = smoothYaw_.update(yaw, dt);
+    pitch = smoothPitch_.update(pitch, dt);
+    roll = smoothRoll_.update(roll, dt);
+
     glm::quat qYaw = glm::angleAxis(glm::radians(yaw), glm::vec3(0, 1, 0));
     glm::quat qPitch = glm::angleAxis(glm::radians(-pitch), glm::vec3(1, 0, 0));
     glm::quat qRoll = glm::angleAxis(glm::radians(roll), glm::vec3(0, 0, 1));
@@ -156,8 +171,10 @@ glm::quat RigSolver::dirToRotation(const glm::vec3& rest, const glm::vec3& targe
 
 glm::quat RigSolver::filterRot(int idx, const glm::quat& q, float dt) {
     glm::vec3 rv = glm::axis(q) * glm::angle(q);
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < 3; i++) {
         rv[i] = poseRotFilters_[idx][i].filter(rv[i], dt);
+        rv[i] = smoothRot_[idx][i].update(rv[i], dt);
+    }
     float a = glm::length(rv);
     if (a < 1e-6f) return glm::quat(1, 0, 0, 0);
     return glm::angleAxis(a, rv / a);
@@ -188,8 +205,10 @@ void RigSolver::updatePose(const PoseResult& pose, float dt) {
         standingFilter_.reset();
         bodyExtentFilter_.reset();
         for (int i = 0; i < 8; i++)
-            for (int j = 0; j < 3; j++)
+            for (int j = 0; j < 3; j++) {
                 poseRotFilters_[i][j].reset();
+                smoothRot_[i][j].reset();
+            }
         return;
     }
 

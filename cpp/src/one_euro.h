@@ -39,3 +39,38 @@ private:
     float x_ = 0.0f, prevFiltX_ = 0.0f, dx_ = 0.0f;
     bool initialized_ = false;
 };
+
+// Critically-damped spring smoother (Unity SmoothDamp algorithm).
+// Produces natural ease-in/ease-out motion with acceleration & deceleration.
+// smoothTime ≈ time to reach ~63% of the way to the target.
+class SmoothFloat {
+public:
+    SmoothFloat(float smoothTime = 0.1f)
+        : smoothTime_(smoothTime), value_(0), velocity_(0), initialized_(false) {}
+
+    float update(float target, float dt) {
+        if (!initialized_) {
+            value_ = target;
+            velocity_ = 0;
+            initialized_ = true;
+            return value_;
+        }
+        if (dt <= 0.0f) return value_;
+        float omega = 2.0f / smoothTime_;
+        float x = omega * dt;
+        float exp = 1.0f / (1.0f + x + 0.48f * x * x + 0.235f * x * x * x);
+        float change = value_ - target;
+        float temp = (velocity_ + omega * change) * dt;
+        velocity_ = (velocity_ - omega * temp) * exp;
+        value_ = target + (change + temp) * exp;
+        return value_;
+    }
+
+    float get() const { return value_; }
+    void reset() { initialized_ = false; velocity_ = 0; }
+
+private:
+    float smoothTime_;
+    float value_, velocity_;
+    bool initialized_;
+};
