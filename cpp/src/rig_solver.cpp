@@ -252,8 +252,11 @@ void RigSolver::updatePose(const PoseResult& pose, float dt) {
         rawY -= spineYNeutral_;
         rawZ -= spineZNeutral_;
     }
-    bodyPose_.twist = std::clamp(rawY, -0.1f, 0.1f);
-    bodyPose_.lateral = std::clamp(rawZ, -0.15f, 0.15f);
+    // Deadzone: suppress small noise from arm-raising artifacts
+    if (std::abs(rawY) < 0.04f) rawY = 0.0f;
+    bodyPose_.twist = std::clamp(rawY, -0.3f, 0.3f);
+    if (std::abs(rawZ) < 0.03f) rawZ = 0.0f;
+    bodyPose_.lateral = std::clamp(rawZ, -0.2f, 0.2f);
 
     // Standing detection: hip visibility with hysteresis (matching Python)
     // Enter stand at hip_vis > 0.50, exit at hip_vis < 0.30
