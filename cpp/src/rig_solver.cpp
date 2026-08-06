@@ -311,6 +311,21 @@ float RigSolver::jointAngle(const glm::vec3& a, const glm::vec3& b, const glm::v
 }
 
 void RigSolver::updateHands(const HandResult& left, const HandResult& right, float dt) {
+    // When standing, skip finger tracking — hand landmarks are too noisy
+    // at full-body distance. Set a clean straight-finger rest pose with
+    // thumbs brought inline (not sticking out horizontally).
+    if (bodyPose_.standing > 0.5f) {
+        handOverrides_.clear();
+        for (int side = 0; side < 2; side++) {
+            int thumbProx = fingerBoneNodes_[side][0][1];
+            if (thumbProx >= 0)
+                handOverrides_[thumbProx] = glm::angleAxis(
+                    glm::radians(side == 0 ? 50.0f : -50.0f), glm::vec3(0, 1, 0));
+        }
+        lastGoodHandOverrides_.clear();
+        return;
+    }
+
     // Detect hand overlap: when hands are close together (folded,
     // interleaved, etc.), MediaPipe landmarks become unreliable and
     // finger curls jitter wildly. Smoothly freeze at last good values.
