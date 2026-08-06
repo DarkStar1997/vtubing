@@ -79,6 +79,7 @@ private:
     int fingerBoneNodes_[2][5][3]{};   // -1 if bone not found
     int handBoneNodes_[2]{};           // leftHand/rightHand node
     std::unordered_map<int, glm::quat> handOverrides_;
+    std::unordered_map<int, glm::quat> lastGoodHandOverrides_;
     float handTwistNeutral_[2] = {0, 0};
     bool handsCalibrated_ = false;
 

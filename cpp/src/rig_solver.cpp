@@ -308,6 +308,20 @@ float RigSolver::jointAngle(const glm::vec3& a, const glm::vec3& b, const glm::v
 }
 
 void RigSolver::updateHands(const HandResult& left, const HandResult& right, float dt) {
+    // Detect hand overlap: when hands are close together (folded,
+    // interleaved, etc.), MediaPipe landmarks become unreliable and
+    // finger curls jitter wildly. Smoothly freeze at last good values.
+    float overlapFactor = 0.0f;
+    if (left.detected && right.detected) {
+        float dx = left.lmX(0) - right.lmX(0);
+        float dy = left.lmY(0) - right.lmY(0);
+        float wristDist = std::sqrt(dx*dx + dy*dy);
+        overlapFactor = 1.0f - std::clamp((wristDist - 0.10f) / 0.08f, 0.0f, 1.0f);
+    }
+
+    // Fully overlapping: keep last good overrides unchanged
+    if (overlapFactor > 0.99f) return;
+
     handOverrides_.clear();
 
     const HandResult* hands[2] = {left.detected ? &left : nullptr,
@@ -375,4 +389,14 @@ void RigSolver::updateHands(const HandResult& left, const HandResult& right, flo
             }
         }
     }
+
+    // Partial overlap: blend live finger rotations toward last good values
+    if (overlapFactor > 0.01f) {
+        for (auto& [node, rot] : handOverrides_) {
+            auto it = lastGoodHandOverrides_.find(node);
+            if (it != lastGoodHandOverrides_.end())
+                rot = glm::slerp(rot, it->second, overlapFactor);
+        }
+    }
+    lastGoodHandOverrides_ = handOverrides_;
 }
