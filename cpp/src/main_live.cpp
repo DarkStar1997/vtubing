@@ -24,11 +24,21 @@ int main(int argc, char** argv) {
 
     std::string vrmPath = "../../assets/avatars/male_52blendshapes.vrm";
     std::string modelDir = "../../assets/models";
+    int maxThreads = 0;  // 0 = auto (hardware_concurrency capped at 16)
+    int targetFps = 0;   // 0 = unlimited
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--models" && i + 1 < argc) { modelDir = argv[++i]; }
+        else if (a == "--threads" && i + 1 < argc) { maxThreads = std::max(2, std::stoi(argv[++i])); }
+        else if (a == "--fps" && i + 1 < argc) { targetFps = std::max(1, std::stoi(argv[++i])); }
         else vrmPath = a;
+    }
+
+    if (maxThreads > 0) {
+        setenv("OMP_NUM_THREADS", std::to_string(maxThreads).c_str(), 1);
+        setenv("TF_NUM_INTRAOP_THREADS", std::to_string(maxThreads).c_str(), 1);
+        setenv("TF_NUM_INTEROP_THREADS", "1", 1);
     }
 
     int fbWidth = 1280, fbHeight = 720;
@@ -103,7 +113,8 @@ int main(int argc, char** argv) {
     glm::mat4 viewProj;
 
     // Init systems
-    int numThreads = std::min((int)std::thread::hardware_concurrency(), 16);
+    int numThreads = (maxThreads > 0) ? maxThreads : std::min((int)std::thread::hardware_concurrency(), 16);
+    fprintf(stderr, "[live] threads: %d\n", numThreads);
     Framebuffer ssfb(renderW, renderH), fb(fbWidth, fbHeight);
 
     WebcamCapture webcam(0, 640, 480, 30);
@@ -512,6 +523,15 @@ int main(int argc, char** argv) {
             frameCount = 0;
             detectCount = 0;
             statTime = now;
+        }
+
+        // Frame rate cap
+        if (targetFps > 0) {
+            auto frameEnd = std::chrono::steady_clock::now();
+            auto frameMicros = std::chrono::duration_cast<std::chrono::microseconds>(frameEnd - now).count();
+            auto targetMicros = 1000000 / targetFps;
+            if (frameMicros < targetMicros)
+                std::this_thread::sleep_for(std::chrono::microseconds(targetMicros - frameMicros));
         }
     }
 
