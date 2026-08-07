@@ -185,6 +185,7 @@ int main(int argc, char** argv) {
     std::atomic<bool> showPiPAtomic{true};
 
     std::thread detectThread([&]() {
+        auto lastDetectTime = std::chrono::steady_clock::now();
         while (running.load()) {
             bool isNew = false;
             Image frame = webcam.getLatest(isNew);
@@ -192,6 +193,17 @@ int main(int argc, char** argv) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
                 continue;
             }
+            // Throttle detection to match render FPS cap — no point running
+            // 3 MediaPipe inferences faster than the display can consume.
+            if (targetFps > 0) {
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - lastDetectTime).count();
+                auto detectPeriod = 1000000 / targetFps;
+                if (elapsed < detectPeriod) {
+                    std::this_thread::sleep_for(std::chrono::microseconds(detectPeriod - elapsed));
+                }
+            }
+            lastDetectTime = std::chrono::steady_clock::now();
             FaceResult result;
             faceTracker.detect(frame, result);
 
