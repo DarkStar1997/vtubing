@@ -17,6 +17,18 @@ compute).
 sudo apt install libsdl3-dev
 ```
 
+### Install SDL3 (Arch Linux)
+
+```bash
+sudo pacman -S sdl3
+```
+
+Arch Linux also requires these packages if not already installed:
+
+```bash
+sudo pacman -S cmake gcc base-devel
+```
+
 ### MediaPipe shared library
 
 The pre-built `libmediapipe.so` must be placed in `cpp/lib/`. You can copy it
