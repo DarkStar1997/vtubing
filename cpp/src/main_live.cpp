@@ -22,6 +22,23 @@ int main(int argc, char** argv) {
     // of libegl_stub.so at runtime (see run command).
     setenv("GLOG_minloglevel", "2", 1);
 
+    auto printUsage = []() {
+        fprintf(stderr,
+            "Usage: vtuber_live [options] [vrm_file]\n"
+            "\n"
+            "Options:\n"
+            "  --models <dir>   Path to MediaPipe model directory\n"
+            "                   (default: ../../assets/models)\n"
+            "  --threads <N>    Limit CPU threads, minimum 2 (default: auto)\n"
+            "  --fps <N>        Cap frame rate to reduce CPU usage (default: unlimited)\n"
+            "  -h, --help       Show this help message\n"
+            "\n"
+            "Controls:\n"
+            "  SPACE            Calibrate neutral pose\n"
+            "  W                Toggle picture-in-picture overlay\n"
+            "  ESC              Quit\n");
+    };
+
     std::string vrmPath = "../../assets/avatars/male_52blendshapes.vrm";
     std::string modelDir = "../../assets/models";
     int maxThreads = 0;  // 0 = auto (hardware_concurrency capped at 16)
@@ -32,6 +49,12 @@ int main(int argc, char** argv) {
         if (a == "--models" && i + 1 < argc) { modelDir = argv[++i]; }
         else if (a == "--threads" && i + 1 < argc) { maxThreads = std::max(2, std::stoi(argv[++i])); }
         else if (a == "--fps" && i + 1 < argc) { targetFps = std::max(1, std::stoi(argv[++i])); }
+        else if (a == "-h" || a == "--help") { printUsage(); return 0; }
+        else if (a.substr(0, 2) == "--") {
+            fprintf(stderr, "Unknown option: %s\n\n", a.c_str());
+            printUsage();
+            return 1;
+        }
         else vrmPath = a;
     }
 
