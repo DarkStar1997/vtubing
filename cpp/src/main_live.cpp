@@ -17,10 +17,16 @@
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/quaternion.hpp>
 
+#ifdef _WIN32
+static inline void setEnvVar(const char* name, const char* value) { _putenv_s(name, value); }
+#else
+static inline void setEnvVar(const char* name, const char* value) { setenv(name, value, 1); }
+#endif
+
 int main(int argc, char** argv) {
-    // Suppress MediaPipe verbose logs. EGL is disabled via LD_PRELOAD
-    // of libegl_stub.so at runtime (see run command).
-    setenv("GLOG_minloglevel", "2", 1);
+    // Suppress MediaPipe verbose logs. On Linux, EGL stubs are compiled in
+    // (with -rdynamic) to force pure-CPU inference.
+    setEnvVar("GLOG_minloglevel", "2");
 
     auto printUsage = []() {
         fprintf(stderr,
@@ -59,9 +65,9 @@ int main(int argc, char** argv) {
     }
 
     if (maxThreads > 0) {
-        setenv("OMP_NUM_THREADS", std::to_string(maxThreads).c_str(), 1);
-        setenv("TF_NUM_INTRAOP_THREADS", std::to_string(maxThreads).c_str(), 1);
-        setenv("TF_NUM_INTEROP_THREADS", "1", 1);
+        setEnvVar("OMP_NUM_THREADS", std::to_string(maxThreads).c_str());
+        setEnvVar("TF_NUM_INTRAOP_THREADS", std::to_string(maxThreads).c_str());
+        setEnvVar("TF_NUM_INTEROP_THREADS", "1");
     }
 
     int fbWidth = 1280, fbHeight = 720;

@@ -7,7 +7,7 @@ compute).
 ## Prerequisites
 
 - **CMake** 3.20+
-- **C++20** compiler (GCC 12+, Clang 15+) with AVX2/FMA support
+- **C++20** compiler (GCC 12+, Clang 15+, or MSVC 2022) with AVX2/FMA support
 - **SDL3** (development libraries)
 - **Python 3** (for MediaPipe model setup only)
 
@@ -29,15 +29,60 @@ Arch Linux also requires these packages if not already installed:
 sudo pacman -S cmake gcc base-devel
 ```
 
+### Setup on Windows (MSVC + CMake + Ninja)
+
+1. **Install tools**: [Visual Studio 2022](https://visualstudio.microsoft.com/)
+   or [Build Tools for Visual Studio 2022](https://visualstudio.microsoft.com/downloads/)
+   with the *Desktop development with C++* workload (includes MSVC, CMake,
+   and Ninja).
+
+2. **Install SDL3** — either via
+   [vcpkg](https://learn.microsoft.com/en-us/vcpkg/get_started/overview):
+   ```powershell
+   vcpkg install sdl3:x64-windows
+   ```
+   or download the prebuilt `SDL3-devel-3.x.x-VC.zip` from the
+   [SDL3 releases](https://github.com/libsdl-org/SDL/releases) page and unzip
+   it somewhere local.
+
+3. **Get libmediapipe.dll** from the Python wheel (a `.whl` is a zip file):
+   ```powershell
+   pip download mediapipe --no-deps
+   Rename-Item mediapipe-<version>-py3-none-win_amd64.whl mediapipe.zip
+   Expand-Archive mediapipe.zip -DestinationName mp_extract
+   Copy-Item mp_extract/mediapipe/tasks/c/libmediapipe.dll cpp/lib/
+   ```
+
+4. **Configure and build** from an *x64 Native Tools Command Prompt for
+   VS 2022* (or a PowerShell that has run `vcvarsall.bat x64`):
+   ```powershell
+   cd cpp
+   cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="C:/path/to/SDL3/devel/cmake"
+   cmake --build build
+   ```
+
+   With vcpkg, add `-DCMAKE_TOOLCHAIN_FILE=<vcpkg-root>/scripts/buildsystems/vcpkg.cmake`
+   instead of `CMAKE_PREFIX_PATH`.
+
+`mediapipe.dll` (and `SDL3.dll` if shared) are copied next to the executables
+automatically after building. For distribution, ship the `.exe` files together
+with those DLLs, the `assets/models/*.task` files, and a VRM avatar. Target
+machines need the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
+(the `x64` variant).
+
 ### MediaPipe shared library
 
-The pre-built `libmediapipe.so` must be placed in `cpp/lib/`. You can copy it
+The pre-built MediaPipe C API library must be placed in `cpp/lib/`
+(`libmediapipe.so` on Linux, `libmediapipe.dll` on Windows). You can copy it
 from a Python `mediapipe` installation:
 
 ```bash
 pip install mediapipe
 cp .venv/lib/python3.12/site-packages/mediapipe/tasks/c/libmediapipe.so cpp/lib/
 ```
+
+On Windows, extract `mediapipe/tasks/c/libmediapipe.dll` from the wheel
+(see the Windows setup section below).
 
 ### Model files
 

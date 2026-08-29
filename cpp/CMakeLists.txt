@@ -44,7 +44,16 @@ file(DOWNLOAD
     STATUS stbw_status)
 
 # --- MediaPipe C API (pre-built shared library) ---
-set(MP_LIB ${CMAKE_CURRENT_SOURCE_DIR}/lib/libmediapipe.so)
+if(WIN32)
+    set(MP_LIB ${CMAKE_CURRENT_SOURCE_DIR}/lib/libmediapipe.dll)
+else()
+    set(MP_LIB ${CMAKE_CURRENT_SOURCE_DIR}/lib/libmediapipe.so)
+endif()
+
+if(MSVC)
+    # cgltf/stb use fopen and other POSIX-named CRT functions
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+endif()
 
 
 # --- Shared rendering sources (used by both targets) ---
@@ -67,18 +76,25 @@ target_link_libraries(vtuber_cpu PRIVATE SDL3::SDL3 glm::glm)
 
 # AVX2 + FMA support
 target_compile_options(vtuber_cpu PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/arch:AVX2>
     $<$<CXX_COMPILER_ID:GNU,Clang>:-mavx2 -mfma -mbmi2>)
 
 # --- Live tracking target (webcam + MediaPipe inference + real-time render) ---
-add_executable(vtuber_live
+set(VTUBER_LIVE_SOURCES
     src/main_live.cpp
     src/webcam.cpp
     src/face_tracker.cpp
     src/pose_tracker.cpp
     src/hand_tracker.cpp
     src/rig_solver.cpp
-    src/egl_stub.c
     ${RENDER_SOURCES})
+if(NOT WIN32)
+    # EGL symbol stubs force MediaPipe onto pure-CPU path on Linux (compiled
+    # in with -rdynamic so they override libEGL at link time).
+    list(APPEND VTUBER_LIVE_SOURCES src/egl_stub.c)
+endif()
+
+add_executable(vtuber_live ${VTUBER_LIVE_SOURCES})
 
 target_include_directories(vtuber_live PRIVATE
     src
@@ -86,17 +102,22 @@ target_include_directories(vtuber_live PRIVATE
     ${THIRD_PARTY_DIR}
     ${bs_thread_pool_SOURCE_DIR}/include)
 
-target_link_options(vtuber_live PRIVATE -rdynamic)
+if(NOT WIN32)
+    target_link_options(vtuber_live PRIVATE -rdynamic)
+endif()
 
 target_link_libraries(vtuber_live PRIVATE
     SDL3::SDL3 glm::glm
     ${MP_LIB})
 
-set_target_properties(vtuber_live PROPERTIES
-    BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/lib"
-    INSTALL_RPATH "$ORIGIN")
+if(UNIX)
+    set_target_properties(vtuber_live PROPERTIES
+        BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/lib"
+        INSTALL_RPATH "$ORIGIN")
+endif()
 
 target_compile_options(vtuber_live PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/arch:AVX2>
     $<$<CXX_COMPILER_ID:GNU,Clang>:-mavx2 -mfma -mbmi2>)
 
 # --- Test tracker target (static image inference) ---
@@ -116,6 +137,24 @@ target_link_libraries(test_tracker PRIVATE
     glm::glm
     ${MP_LIB})
 
-set_target_properties(test_tracker PROPERTIES
-    BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/lib"
-    INSTALL_RPATH "$ORIGIN")
+if(UNIX)
+    set_target_properties(test_tracker PROPERTIES
+        BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/lib"
+        INSTALL_RPATH "$ORIGIN")
+endif()
+
+# --- Windows: copy runtime DLLs next to the executables ---
+if(WIN32)
+    foreach(tgt vtuber_live test_tracker)
+        add_custom_command(TARGET ${tgt} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${MP_LIB} $<TARGET_FILE_DIR:${tgt}>)
+    endforeach()
+    foreach(tgt vtuber_live vtuber_cpu)
+        if(TARGET SDL3::SDL3-shared)
+            add_custom_command(TARGET ${tgt} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_FILE:SDL3::SDL3-shared> $<TARGET_FILE_DIR:${tgt}>)
+        endif()
+    endforeach()
+endif()
