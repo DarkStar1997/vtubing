@@ -9,7 +9,8 @@ compute).
 - **CMake** 3.20+
 - **C++20** compiler (GCC 12+, Clang 15+, or MSVC 2022) with AVX2/FMA support
 - **SDL3** (development libraries)
-- **Python 3** (for MediaPipe model setup only)
+- **[uv](https://docs.astral.sh/uv/)** (standalone binary; supplies the MediaPipe
+  C library — and a managed Python — via the project lockfile)
 
 ### Install SDL3 (Ubuntu/Debian)
 
@@ -45,13 +46,17 @@ sudo pacman -S cmake gcc base-devel
    [SDL3 releases](https://github.com/libsdl-org/SDL/releases) page and unzip
    it somewhere local.
 
-3. **Get libmediapipe.dll** from the Python wheel (a `.whl` is a zip file):
+3. **Get libmediapipe.dll** — install [uv](https://docs.astral.sh/uv/)
+   (`winget install --id=astral-sh.uv -e` or the PowerShell installer from
+   <https://docs.astral.sh/uv/getting-started/install/>), then from the repo
+   root run:
    ```powershell
-   pip download mediapipe --no-deps
-   Rename-Item mediapipe-<version>-py3-none-win_amd64.whl mediapipe.zip
-   Expand-Archive mediapipe.zip -DestinationName mp_extract
-   Copy-Item mp_extract/mediapipe/tasks/c/libmediapipe.dll cpp/lib/
+   uv sync
    ```
+   This creates `.venv\` with the `mediapipe` wheel (uv downloads a managed
+   Python automatically — no Python or pip install needed). CMake copies
+   `.venv\Lib\site-packages\mediapipe\tasks\c\libmediapipe.dll` into `cpp\lib\`
+   automatically at configure time.
 
 4. **Configure and build** from an *x64 Native Tools Command Prompt for
    VS 2022* (or a PowerShell that has run `vcvarsall.bat x64`):
@@ -72,17 +77,22 @@ machines need the [Microsoft Visual C++ Redistributable](https://learn.microsoft
 
 ### MediaPipe shared library
 
-The pre-built MediaPipe C API library must be placed in `cpp/lib/`
-(`libmediapipe.so` on Linux, `libmediapipe.dll` on Windows). You can copy it
-from a Python `mediapipe` installation:
+The pre-built MediaPipe C API library must be present in `cpp/lib/`
+(`libmediapipe.so` on Linux, `libmediapipe.dll` on Windows). Running
+`uv sync` in the repo root installs the `mediapipe` wheel into `.venv/`,
+and CMake automatically copies the library from there into `cpp/lib/`
+at configure time:
 
 ```bash
-pip install mediapipe
-cp .venv/lib/python3.12/site-packages/mediapipe/tasks/c/libmediapipe.so cpp/lib/
+uv sync
+cd cpp && cmake -B build -DCMAKE_BUILD_TYPE=Release
 ```
 
-On Windows, extract `mediapipe/tasks/c/libmediapipe.dll` from the wheel
-(see the Windows setup section below).
+No pip or system Python required — uv manages its own interpreter. If you
+prefer a manual copy, the library lives at
+`.venv/lib/python3.*/site-packages/mediapipe/tasks/c/libmediapipe.so`
+(Linux) or `.venv\Lib\site-packages\mediapipe\tasks\c\libmediapipe.dll`
+(Windows).
 
 ### Model files
 

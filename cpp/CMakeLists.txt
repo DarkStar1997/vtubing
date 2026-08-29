@@ -66,10 +66,12 @@ if(NOT EXISTS ${MP_LIB})
     else()
         message(FATAL_ERROR
             "libmediapipe not found at ${MP_LIB}\n"
-            "Install the Python deps first (uv sync) so the venv contains the\n"
-            "mediapipe wheel, then re-run CMake — it will be copied automatically.\n"
-            "Or copy it manually:\n"
-            "  cp .venv/lib/python3.12/site-packages/mediapipe/tasks/c/libmediapipe.so cpp/lib/")
+            "Run 'uv sync' in the repo root first (install uv from\n"
+            "https://docs.astral.sh/uv/ if needed). This creates .venv/ with\n"
+            "the mediapipe wheel; re-run CMake and the library will be copied\n"
+            "automatically. Manual copy:\n"
+            "  Linux:   cp .venv/lib/python3.*/site-packages/mediapipe/tasks/c/libmediapipe.so cpp/lib/\n"
+            "  Windows: copy .venv\\Lib\\site-packages\\mediapipe\\tasks\\c\\libmediapipe.dll to cpp\\lib\\")
     endif()
 endif()
 
