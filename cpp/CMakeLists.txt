@@ -46,8 +46,31 @@ file(DOWNLOAD
 # --- MediaPipe C API (pre-built shared library) ---
 if(WIN32)
     set(MP_LIB ${CMAKE_CURRENT_SOURCE_DIR}/lib/libmediapipe.dll)
+    set(MP_VENV_PATH .venv/Lib/site-packages/mediapipe/tasks/c/libmediapipe.dll)
 else()
     set(MP_LIB ${CMAKE_CURRENT_SOURCE_DIR}/lib/libmediapipe.so)
+    set(MP_VENV_PATH .venv/lib/python3.12/site-packages/mediapipe/tasks/c/libmediapipe.so)
+endif()
+
+# Auto-copy from the Python venv if the library is missing.
+if(NOT EXISTS ${MP_LIB})
+    set(MP_VENV_CANDIDATE ${CMAKE_SOURCE_DIR}/../${MP_VENV_PATH})
+    if(NOT EXISTS ${MP_VENV_CANDIDATE})
+        file(GLOB MP_VENV_GLOB
+            ${CMAKE_SOURCE_DIR}/../.venv/lib/python*/site-packages/mediapipe/tasks/c/libmediapipe.so)
+        list(GET MP_VENV_GLOB 0 MP_VENV_CANDIDATE)
+    endif()
+    if(MP_VENV_CANDIDATE AND EXISTS ${MP_VENV_CANDIDATE})
+        message(STATUS "Copying libmediapipe from venv: ${MP_VENV_CANDIDATE}")
+        file(COPY ${MP_VENV_CANDIDATE} DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/lib)
+    else()
+        message(FATAL_ERROR
+            "libmediapipe not found at ${MP_LIB}\n"
+            "Install the Python deps first (uv sync) so the venv contains the\n"
+            "mediapipe wheel, then re-run CMake — it will be copied automatically.\n"
+            "Or copy it manually:\n"
+            "  cp .venv/lib/python3.12/site-packages/mediapipe/tasks/c/libmediapipe.so cpp/lib/")
+    endif()
 endif()
 
 if(MSVC)
