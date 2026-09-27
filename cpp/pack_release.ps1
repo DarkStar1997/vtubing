@@ -14,7 +14,11 @@
 param(
     [string]$Version = "0.1.0",
     [string]$BuildDir = "",
-    [string]$CrtDir = ""
+    [string]$CrtDir = "",
+    # Optional Authenticode signing (applied before zipping):
+    [string]$SignPfx = "",                          # PFX file
+    $SignPassword = $null,                          # PFX password, SecureString or plain
+    [string]$SignThumbprint = ""                    # cert in a store (token/SimplySign)
 )
 $ErrorActionPreference = 'Stop'
 
@@ -177,6 +181,16 @@ redistribution, credit, etc.). Use each model according to its terms; the
 CC0 samples have no restrictions.
 "@
 Set-Content -Path (Join-Path $stage 'THIRD_PARTY_NOTICES.md') -Value $notices -Encoding UTF8
+
+# --- Sign binaries (optional, before zipping) --------------------------------
+if ($SignPfx -or $SignThumbprint) {
+    $signArgs = @{ Path = $stage }
+    if ($SignPfx)      { $signArgs.Pfx = $SignPfx; $signArgs.Password = $SignPassword }
+    if ($SignThumbprint) { $signArgs.Thumbprint = $SignThumbprint }
+    & (Join-Path $cppDir 'sign_release.ps1') @signArgs
+    if ($LASTEXITCODE -ne 0) { throw "Signing failed" }
+    Write-Host ""
+}
 
 # --- Zip -------------------------------------------------------------------
 if (Test-Path $zipPath) { Remove-Item $zipPath }

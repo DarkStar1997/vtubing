@@ -75,6 +75,36 @@ powershell -ExecutionPolicy Bypass -File pack_release.ps1 -Version 0.1.0
 The zip lands in `dist/` and runs on any Windows 10/11 x64 machine — no
 VC++ Redistributable install required.
 
+### Signing the release binaries
+
+Unsigned binaries trigger SmartScreen ("Windows protected your PC") and
+occasional antivirus false positives. Signing is integrated into packaging:
+
+```powershell
+# With a PFX certificate file (password is prompted):
+powershell -File pack_release.ps1 -Version 0.2.0 -SignPfx mycert.pfx
+
+# With a certificate in a store (hardware token, Certum SimplySign):
+powershell -File pack_release.ps1 -Version 0.2.0 -SignThumbprint <hex>
+
+# Or sign an already-staged package folder:
+powershell -File sign_release.ps1 -Path dist\vtuber-cpu-v0.2.0-windows-x64 -Pfx mycert.pfx
+```
+
+Signatures are SHA-256 with an RFC 3161 timestamp (DigiCert responder by
+default, override with `-TsaUrl`). Certificate routes for open-source
+projects:
+
+| Route | Cost | Notes |
+|---|---|---|
+| [Certum Open Source](https://certum.pl) | ~€69/yr | Code-signing cert for OSS; cloud signing via SimplySign → use `-SignThumbprint` |
+| [SignPath Foundation](https://signpath.org) | free | Free signing for OSS projects, GitHub integration; requires application |
+| [Azure Trusted Signing](https://azure.microsoft.com/products/trusted-signing) | $9.99/mo | Individual identity validation, CI-friendly |
+| DigiCert/Sectigo EV | ~$400+/yr | Instant SmartScreen reputation; hardware token |
+
+Self-signed certificates exercise the pipeline but do not remove SmartScreen
+warnings for end users.
+
 ### MediaPipe shared library
 
 The pre-built MediaPipe C API library must be present in `cpp/lib/`
