@@ -11,10 +11,26 @@ endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # --- Dependencies ---
-find_package(SDL3 REQUIRED)
-
 include(FetchContent)
 set(FETCH_CONTENT_QUIET OFF)
+
+# SDL3: prefer a system/package install (apt, pacman, vcpkg, or
+# CMAKE_PREFIX_PATH) when available; otherwise fetch the pinned release
+# and build it from source as part of this project.
+find_package(SDL3 QUIET)
+if(NOT SDL3_FOUND)
+    message(STATUS "SDL3 not found - fetching release-3.4.16 and building from source")
+    # Keep the vendored build lean: shared lib only, no test scaffolding.
+    set(SDL_SHARED ON CACHE BOOL "" FORCE)
+    set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+    set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(SDL3
+        GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+        GIT_TAG release-3.4.16
+        GIT_SHALLOW TRUE)
+    FetchContent_MakeAvailable(SDL3)
+endif()
 
 FetchContent_Declare(glm
     GIT_REPOSITORY https://github.com/g-truc/glm.git
@@ -45,33 +61,77 @@ file(DOWNLOAD
 
 # --- MediaPipe C API (pre-built shared library) ---
 if(WIN32)
-    set(MP_LIB ${CMAKE_CURRENT_SOURCE_DIR}/lib/libmediapipe.dll)
+    # MSVC's linker cannot link a DLL directly (LNK1107): link against an
+    # import library and copy the DLL next to the executables post-build.
+    set(MP_DLL ${CMAKE_CURRENT_SOURCE_DIR}/lib/libmediapipe.dll)
+    set(MP_LIB ${CMAKE_CURRENT_SOURCE_DIR}/lib/libmediapipe.lib)
     set(MP_VENV_PATH .venv/Lib/site-packages/mediapipe/tasks/c/libmediapipe.dll)
 else()
+    set(MP_DLL)
     set(MP_LIB ${CMAKE_CURRENT_SOURCE_DIR}/lib/libmediapipe.so)
     set(MP_VENV_PATH .venv/lib/python3.12/site-packages/mediapipe/tasks/c/libmediapipe.so)
 endif()
 
 # Auto-copy from the Python venv if the library is missing.
-if(NOT EXISTS ${MP_LIB})
-    set(MP_VENV_CANDIDATE ${CMAKE_SOURCE_DIR}/../${MP_VENV_PATH})
-    if(NOT EXISTS ${MP_VENV_CANDIDATE})
-        file(GLOB MP_VENV_GLOB
-            ${CMAKE_SOURCE_DIR}/../.venv/lib/python*/site-packages/mediapipe/tasks/c/libmediapipe.so)
-        list(GET MP_VENV_GLOB 0 MP_VENV_CANDIDATE)
+if(WIN32)
+    if(NOT EXISTS ${MP_DLL})
+        set(MP_VENV_CANDIDATE ${CMAKE_SOURCE_DIR}/../${MP_VENV_PATH})
+        if(MP_VENV_CANDIDATE AND EXISTS ${MP_VENV_CANDIDATE})
+            message(STATUS "Copying libmediapipe from venv: ${MP_VENV_CANDIDATE}")
+            file(COPY ${MP_VENV_CANDIDATE} DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/lib)
+        else()
+            message(FATAL_ERROR
+                "libmediapipe not found at ${MP_DLL}\n"
+                "Run 'uv sync' in the repo root first (install uv from\n"
+                "https://docs.astral.sh/uv/ if needed). This creates .venv/ with\n"
+                "the mediapipe wheel; re-run CMake and the DLL will be copied\n"
+                "automatically. Manual copy:\n"
+                "  copy .venv\\Lib\\site-packages\\mediapipe\\tasks\\c\\libmediapipe.dll to cpp\\lib\\")
+        endif()
     endif()
-    if(MP_VENV_CANDIDATE AND EXISTS ${MP_VENV_CANDIDATE})
-        message(STATUS "Copying libmediapipe from venv: ${MP_VENV_CANDIDATE}")
-        file(COPY ${MP_VENV_CANDIDATE} DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/lib)
-    else()
-        message(FATAL_ERROR
-            "libmediapipe not found at ${MP_LIB}\n"
-            "Run 'uv sync' in the repo root first (install uv from\n"
-            "https://docs.astral.sh/uv/ if needed). This creates .venv/ with\n"
-            "the mediapipe wheel; re-run CMake and the library will be copied\n"
-            "automatically. Manual copy:\n"
-            "  Linux:   cp .venv/lib/python3.*/site-packages/mediapipe/tasks/c/libmediapipe.so cpp/lib/\n"
-            "  Windows: copy .venv\\Lib\\site-packages\\mediapipe\\tasks\\c\\libmediapipe.dll to cpp\\lib\\")
+
+    # The MediaPipe wheel ships no import library: generate one from the
+    # DLL's exported symbols. Requires dumpbin/lib on PATH (VS dev prompt).
+    if(NOT EXISTS ${MP_LIB})
+        find_program(DUMPBIN_EXECUTABLE dumpbin)
+        find_program(LIB_EXECUTABLE lib)
+        if(NOT DUMPBIN_EXECUTABLE OR NOT LIB_EXECUTABLE)
+            message(FATAL_ERROR
+                "Cannot generate ${MP_LIB}: dumpbin/lib not found on PATH.\n"
+                "Configure from an x64 Native Tools Command Prompt for VS\n"
+                "(or a shell that has run vcvarsall.bat x64), or provide\n"
+                "libmediapipe.lib manually in cpp/lib/.")
+        endif()
+        message(STATUS "Generating import library: ${MP_LIB}")
+        execute_process(
+            COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                    -File ${CMAKE_CURRENT_SOURCE_DIR}/cmake/gen_mediapipe_implib.ps1
+                    ${MP_DLL} ${MP_LIB}
+            RESULT_VARIABLE mp_implib_result)
+        if(NOT mp_implib_result EQUAL 0)
+            message(FATAL_ERROR "Failed to generate import library for ${MP_DLL}")
+        endif()
+    endif()
+else()
+    if(NOT EXISTS ${MP_LIB})
+        set(MP_VENV_CANDIDATE ${CMAKE_SOURCE_DIR}/../${MP_VENV_PATH})
+        if(NOT EXISTS ${MP_VENV_CANDIDATE})
+            file(GLOB MP_VENV_GLOB
+                ${CMAKE_SOURCE_DIR}/../.venv/lib/python*/site-packages/mediapipe/tasks/c/libmediapipe.so)
+            list(GET MP_VENV_GLOB 0 MP_VENV_CANDIDATE)
+        endif()
+        if(MP_VENV_CANDIDATE AND EXISTS ${MP_VENV_CANDIDATE})
+            message(STATUS "Copying libmediapipe from venv: ${MP_VENV_CANDIDATE}")
+            file(COPY ${MP_VENV_CANDIDATE} DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/lib)
+        else()
+            message(FATAL_ERROR
+                "libmediapipe not found at ${MP_LIB}\n"
+                "Run 'uv sync' in the repo root first (install uv from\n"
+                "https://docs.astral.sh/uv/ if needed). This creates .venv/ with\n"
+                "the mediapipe wheel; re-run CMake and the library will be copied\n"
+                "automatically. Manual copy:\n"
+                "  cp .venv/lib/python3.*/site-packages/mediapipe/tasks/c/libmediapipe.so cpp/lib/")
+        endif()
     endif()
 endif()
 
@@ -173,7 +233,7 @@ if(WIN32)
     foreach(tgt vtuber_live test_tracker)
         add_custom_command(TARGET ${tgt} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${MP_LIB} $<TARGET_FILE_DIR:${tgt}>)
+                ${MP_DLL} $<TARGET_FILE_DIR:${tgt}>)
     endforeach()
     foreach(tgt vtuber_live vtuber_cpu)
         if(TARGET SDL3::SDL3-shared)
