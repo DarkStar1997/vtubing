@@ -8,19 +8,24 @@ compute).
 
 - **CMake** 3.20+
 - **C++20** compiler (GCC 12+, Clang 15+, or MSVC 2022) with AVX2/FMA support
-- **SDL3** (development libraries)
 - **[uv](https://docs.astral.sh/uv/)** (standalone binary; supplies the MediaPipe
   C library — and a managed Python — via the project lockfile)
 
-### Install SDL3 (Ubuntu/Debian)
+### SDL3
+
+SDL3 is **not** required to be installed manually: if CMake cannot find an
+existing SDL3 (distro package, vcpkg, or `CMAKE_PREFIX_PATH`), the pinned
+release [`release-3.4.16`](https://github.com/libsdl-org/SDL/releases/tag/release-3.4.16)
+is fetched via FetchContent and built from source as part of the project.
+
+Installing a system package is optional and takes precedence over the source
+build (faster incremental builds, distro integration):
 
 ```bash
+# Ubuntu/Debian
 sudo apt install libsdl3-dev
-```
 
-### Install SDL3 (Arch Linux)
-
-```bash
+# Arch Linux
 sudo pacman -S sdl3
 ```
 
@@ -35,18 +40,9 @@ sudo pacman -S cmake gcc base-devel
 1. **Install tools**: [Visual Studio 2022](https://visualstudio.microsoft.com/)
    or [Build Tools for Visual Studio 2022](https://visualstudio.microsoft.com/downloads/)
    with the *Desktop development with C++* workload (includes MSVC, CMake,
-   and Ninja).
+   and Ninja). SDL3 is fetched and built automatically — nothing to install.
 
-2. **Install SDL3** — either via
-   [vcpkg](https://learn.microsoft.com/en-us/vcpkg/get_started/overview):
-   ```powershell
-   vcpkg install sdl3:x64-windows
-   ```
-   or download the prebuilt `SDL3-devel-3.x.x-VC.zip` from the
-   [SDL3 releases](https://github.com/libsdl-org/SDL/releases) page and unzip
-   it somewhere local.
-
-3. **Get libmediapipe.dll** — install [uv](https://docs.astral.sh/uv/)
+2. **Get libmediapipe.dll** — install [uv](https://docs.astral.sh/uv/)
    (`winget install --id=astral-sh.uv -e` or the PowerShell installer from
    <https://docs.astral.sh/uv/getting-started/install/>), then from the repo
    root run:
@@ -56,24 +52,28 @@ sudo pacman -S cmake gcc base-devel
    This creates `.venv\` with the `mediapipe` wheel (uv downloads a managed
    Python automatically — no Python or pip install needed). CMake copies
    `.venv\Lib\site-packages\mediapipe\tasks\c\libmediapipe.dll` into `cpp\lib\`
-   automatically at configure time.
+   automatically at configure time and generates the import library
+   (`libmediapipe.lib`) from its exports.
 
-4. **Configure and build** from an *x64 Native Tools Command Prompt for
+3. **Configure and build** from an *x64 Native Tools Command Prompt for
    VS 2022* (or a PowerShell that has run `vcvarsall.bat x64`):
    ```powershell
    cd cpp
-   cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="C:/path/to/SDL3/devel/cmake"
+   cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
    cmake --build build
    ```
 
-   With vcpkg, add `-DCMAKE_TOOLCHAIN_FILE=<vcpkg-root>/scripts/buildsystems/vcpkg.cmake`
-   instead of `CMAKE_PREFIX_PATH`.
-
 `mediapipe.dll` (and `SDL3.dll` if shared) are copied next to the executables
-automatically after building. For distribution, ship the `.exe` files together
-with those DLLs, the `assets/models/*.task` files, and a VRM avatar. Target
-machines need the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
-(the `x64` variant).
+automatically after building. For a self-contained Windows release zip
+(executables, DLLs, app-local MSVC runtime, models, avatars, README and
+third-party notices), run from `cpp/`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File pack_release.ps1 -Version 0.1.0
+```
+
+The zip lands in `dist/` and runs on any Windows 10/11 x64 machine — no
+VC++ Redistributable install required.
 
 ### MediaPipe shared library
 
@@ -115,7 +115,8 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-Dependencies (GLM, BS::thread_pool, cgltf, stb) are fetched automatically by CMake.
+Dependencies (SDL3 release-3.4.16 when no system copy is found, GLM,
+BS::thread_pool, cgltf, stb) are fetched automatically by CMake.
 
 ## Targets
 
@@ -136,18 +137,24 @@ cd cpp/build
 
 | Flag | Default | Description |
 |---|---|---|
-| `--models <dir>` | `../../assets/models` | Path to MediaPipe model directory |
-| `--threads <N>` | auto (max 16) | Limit CPU threads (minimum 2) |
-| `--fps <N>` | unlimited | Cap frame rate to reduce CPU usage |
-| `[vrm_file]` | `../../assets/avatars/male_52blendshapes.vrm` | VRM avatar to load |
+| `--models <dir>` | auto-detected | Path to MediaPipe model directory (`assets/models` or `../../assets/models` relative to the executable) |
+| `--threads <N>` | 2 | CPU threads, minimum 2 (`0` = automatic, up to 16) |
+| `--fps <N>` | 15 | Frame-rate cap in fps (`0` = unlimited) |
+| `[vrm_file]` | auto-detected | VRM avatar to load (`assets/avatars/male_52blendshapes.vrm`) |
+
+By default the app runs lightweight: 2 threads and a 15 fps cap (tracking
+included), leaving plenty of CPU headroom for games and OBS.
 
 ### Examples
 
 ```bash
-# Full quality, all threads
+# Lightweight (default): 2 threads, 15 fps cap
 ./vtuber_live
 
-# Low CPU usage: 4 threads, 60fps cap
+# Full quality: automatic threads, uncapped frame rate
+./vtuber_live --threads 0 --fps 0
+
+# Balanced: 4 threads, 60 fps cap
 ./vtuber_live --threads 4 --fps 60
 
 # Different avatar

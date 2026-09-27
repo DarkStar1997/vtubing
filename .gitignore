@@ -31,6 +31,7 @@ cpp/lib/
 
 # Output artifacts
 /output/
+/dist/
 *.mp4
 *.avi
 output_cpp.png
