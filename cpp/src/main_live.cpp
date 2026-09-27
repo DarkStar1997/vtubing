@@ -14,6 +14,7 @@
 #include <atomic>
 #include <mutex>
 #include <chrono>
+#include <filesystem>
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/quaternion.hpp>
 
@@ -22,6 +23,24 @@ static inline void setEnvVar(const char* name, const char* value) { _putenv_s(na
 #else
 static inline void setEnvVar(const char* name, const char* value) { setenv(name, value, 1); }
 #endif
+
+// Resolve a default resource path so the app works both from a build tree
+// (assets at ../../assets relative to the executable) and from an extracted
+// release package (assets/ next to the executable). Paths relative to the
+// executable take priority over the working directory.
+static std::string defaultAssetPath(const char* rel) {
+    namespace fs = std::filesystem;
+    std::vector<std::string> candidates;
+    if (const char* base = SDL_GetBasePath()) {
+        candidates.push_back(std::string(base) + rel);                // release layout
+        candidates.push_back(std::string(base) + "../../" + rel);     // build tree
+    }
+    candidates.push_back(std::string("../../") + rel);                // legacy CWD default
+    candidates.push_back(rel);                                        // CWD (release layout)
+    for (const auto& c : candidates)
+        if (fs::exists(c)) return c;
+    return std::string("../../") + rel;
+}
 
 int main(int argc, char** argv) {
     // Suppress MediaPipe verbose logs. On Linux, EGL stubs are compiled in
@@ -34,9 +53,12 @@ int main(int argc, char** argv) {
             "\n"
             "Options:\n"
             "  --models <dir>   Path to MediaPipe model directory\n"
-            "                   (default: ../../assets/models)\n"
-            "  --threads <N>    Limit CPU threads, minimum 2 (default: auto)\n"
-            "  --fps <N>        Cap frame rate to reduce CPU usage (default: unlimited)\n"
+            "                   (default: auto-detected: assets/models or\n"
+            "                   ../../assets/models next to the executable)\n"
+            "  --threads <N>    Limit CPU threads, minimum 2 (default: 2)\n"
+            "                   Use 0 for automatic (all cores, up to 16)\n"
+            "  --fps <N>        Cap frame rate to reduce CPU usage (default: 15)\n"
+            "                   Use 0 for unlimited\n"
             "  -h, --help       Show this help message\n"
             "\n"
             "Controls:\n"
@@ -45,16 +67,22 @@ int main(int argc, char** argv) {
             "  ESC              Quit\n");
     };
 
-    std::string vrmPath = "../../assets/avatars/male_52blendshapes.vrm";
-    std::string modelDir = "../../assets/models";
-    int maxThreads = 0;  // 0 = auto (hardware_concurrency capped at 16)
-    int targetFps = 0;   // 0 = unlimited
+    std::string vrmPath = defaultAssetPath("assets/avatars/male_52blendshapes.vrm");
+    std::string modelDir = defaultAssetPath("assets/models");
+    // Lightweight defaults: 2 threads (implementation minimum) and a 15 fps
+    // cap keep CPU usage low; the app stays responsive for typical VTubing.
+    // Override with --threads 0 (auto, up to 16) and --fps 0 (unlimited).
+    int maxThreads = 2;
+    int targetFps = 15;
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--models" && i + 1 < argc) { modelDir = argv[++i]; }
-        else if (a == "--threads" && i + 1 < argc) { maxThreads = std::max(2, std::stoi(argv[++i])); }
-        else if (a == "--fps" && i + 1 < argc) { targetFps = std::max(1, std::stoi(argv[++i])); }
+        else if (a == "--threads" && i + 1 < argc) {
+            maxThreads = std::stoi(argv[++i]);
+            if (maxThreads != 0) maxThreads = std::max(2, maxThreads);  // 0 = auto, else minimum 2
+        }
+        else if (a == "--fps" && i + 1 < argc) { targetFps = std::max(0, std::stoi(argv[++i])); }
         else if (a == "-h" || a == "--help") { printUsage(); return 0; }
         else if (a.substr(0, 2) == "--") {
             fprintf(stderr, "Unknown option: %s\n\n", a.c_str());

@@ -10,9 +10,28 @@
 #include <cmath>
 #include <vector>
 #include <thread>
+#include <filesystem>
+
+// Resolve a default resource path so the app works both from a build tree
+// (assets at ../../assets relative to the executable) and from an extracted
+// release package (assets/ next to the executable). Paths relative to the
+// executable take priority over the working directory.
+static std::string defaultAssetPath(const char* rel) {
+    namespace fs = std::filesystem;
+    std::vector<std::string> candidates;
+    if (const char* base = SDL_GetBasePath()) {
+        candidates.push_back(std::string(base) + rel);                // release layout
+        candidates.push_back(std::string(base) + "../../" + rel);     // build tree
+    }
+    candidates.push_back(std::string("../../") + rel);                // legacy CWD default
+    candidates.push_back(rel);                                        // CWD (release layout)
+    for (const auto& c : candidates)
+        if (fs::exists(c)) return c;
+    return std::string("../../") + rel;
+}
 
 int main(int argc, char** argv) {
-    std::string vrmPath = "../../assets/avatars/male_52blendshapes.vrm";
+    std::string vrmPath = defaultAssetPath("assets/avatars/male_52blendshapes.vrm");
 
     // Parse args: [--bench N] [--ss N] [vrm_path]
     int benchFrames = 0;
