@@ -170,6 +170,7 @@ cd cpp/build
 | `--models <dir>` | auto-detected | Path to MediaPipe model directory (`assets/models` or `../../assets/models` relative to the executable) |
 | `--threads <N>` | 2 | CPU threads, minimum 2 (`0` = automatic, up to 16) |
 | `--fps <N>` | 15 | Frame-rate cap in fps (`0` = unlimited) |
+| `--no-pip` | off | Start without the webcam picture-in-picture overlay (W toggles it) |
 | `[vrm_file]` | auto-detected | VRM avatar to load (`assets/avatars/male_52blendshapes.vrm`) |
 
 By default the app runs lightweight: 2 threads and a 15 fps cap (tracking

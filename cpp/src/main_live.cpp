@@ -59,6 +59,8 @@ int main(int argc, char** argv) {
             "                   Use 0 for automatic (all cores, up to 16)\n"
             "  --fps <N>        Cap frame rate to reduce CPU usage (default: 15)\n"
             "                   Use 0 for unlimited\n"
+            "  --no-pip         Start without the webcam picture-in-picture\n"
+            "                   overlay (W toggles it at runtime)\n"
             "  -h, --help       Show this help message\n"
             "\n"
             "Controls:\n"
@@ -74,6 +76,7 @@ int main(int argc, char** argv) {
     // Override with --threads 0 (auto, up to 16) and --fps 0 (unlimited).
     int maxThreads = 2;
     int targetFps = 15;
+    bool noPip = false;  // start without the webcam picture-in-picture overlay
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -83,6 +86,7 @@ int main(int argc, char** argv) {
             if (maxThreads != 0) maxThreads = std::max(2, maxThreads);  // 0 = auto, else minimum 2
         }
         else if (a == "--fps" && i + 1 < argc) { targetFps = std::max(0, std::stoi(argv[++i])); }
+        else if (a == "--no-pip") { noPip = true; }
         else if (a == "-h" || a == "--help") { printUsage(); return 0; }
         else if (a.substr(0, 2) == "--") {
             fprintf(stderr, "Unknown option: %s\n\n", a.c_str());
@@ -194,7 +198,7 @@ int main(int argc, char** argv) {
     SDL_Window* window = SDL_CreateWindow("VTuber Live", fbWidth, fbHeight, 0);
     SDL_Surface* winSurface = SDL_GetWindowSurface(window);
 
-    bool showPiP = true, calibrating = false;
+    bool showPiP = !noPip, calibrating = false;
     bool framingApplied = false;
     float calibFaceMinY = 1.0f, calibFaceMaxY = 0.0f;
     int calibFaceFrames = 0;
@@ -216,7 +220,7 @@ int main(int argc, char** argv) {
     std::mutex trackMutex;
     std::atomic<bool> hasNewTrack{false};
     std::atomic<bool> running{true};
-    std::atomic<bool> showPiPAtomic{true};
+    std::atomic<bool> showPiPAtomic{showPiP};
 
     std::thread detectThread([&]() {
         auto lastDetectTime = std::chrono::steady_clock::now();
