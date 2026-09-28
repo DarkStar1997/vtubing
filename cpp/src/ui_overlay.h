@@ -20,6 +20,7 @@ public:
 
     void toggleCameraMenu() {
         showCameraMenu = !showCameraMenu;
+        if (showCameraMenu) visible = true;
     }
 
     void setStatus(const std::string& msg, float duration = 3.0f, bool isError = false) {
@@ -119,8 +120,8 @@ public:
         }
     }
 
-    void render(uint8_t* bgra, int fbW, int fbH, const std::vector<CameraDeviceInfo>& cameras, int activeIndex, const std::string& activeName) {
-        if (!visible && !showCameraMenu) return;
+    void render(uint8_t* bgra, int fbW, int fbH, const std::vector<CameraDeviceInfo>& cameras, SDL_CameraID activeDevId, const std::string& activeName) {
+        if (!visible) return;
 
         // 1. Compact HUD bar at Top-Left
         const int hudX = 14;
@@ -177,7 +178,7 @@ public:
                 itemY += 24;
             } else {
                 for (int i = 0; i < camCount; i++) {
-                    bool isActive = (i == activeIndex);
+                    bool isActive = (cameras[i].id == activeDevId);
                     if (isActive) {
                         // Highlight active row
                         drawBoxAlpha(bgra, fbW, fbH, hudX + 6, itemY, menuW - 12, 20, 30, 60, 90, 200);

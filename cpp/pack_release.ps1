@@ -102,8 +102,11 @@ No installer, nothing to install - everything needed is inside this zip.
 
 | Key | Action |
 |-----|--------|
+| C | Toggle camera selection menu & keyboard shortcuts legend |
+| 1-9 | Directly select camera source |
+| R | Rescan connected camera devices |
 | SPACE | Calibrate neutral pose (face, body, hands) |
-| W | Toggle webcam picture-in-picture overlay (bottom-right) |
+| W | Toggle webcam picture-in-picture & UI overlay |
 | ESC | Quit |
 
 ## Performance
@@ -164,6 +167,7 @@ licensed under its own terms.
 | BS::thread_pool 5.0.0 | MIT | https://github.com/bshoshany/thread-pool |
 | cgltf 1.14 | MIT | https://github.com/jkuhlmann/cgltf |
 | stb | Public Domain / Unlicense | https://github.com/nothings/stb |
+| font8x8 | Public Domain | https://github.com/dhepper/font8x8 |
 | MSVC runtime DLLs | Microsoft Visual C++ Redistributable terms | https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist |
 
 ## VRM avatar models

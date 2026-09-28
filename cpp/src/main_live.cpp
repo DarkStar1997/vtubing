@@ -374,6 +374,9 @@ int main(int argc, char** argv) {
                     showPiP = !showPiP;
                     showPiPAtomic.store(showPiP);
                     uiOverlay.visible = showPiP;
+                    if (!uiOverlay.visible) {
+                        uiOverlay.showCameraMenu = false;
+                    }
                 }
                 else if (event.key.key == SDLK_SPACE) { calibrating = true; fprintf(stderr, "[live] Calibrating...\n"); }
                 else if (event.key.key == SDLK_C) {
@@ -391,9 +394,10 @@ int main(int argc, char** argv) {
                         targetIdx = (int)(event.key.key - SDLK_KP_1);
                     }
                     if (targetIdx >= 0 && targetIdx < (int)availableCameras.size()) {
-                        if (targetIdx != webcam.getIndex()) {
+                        SDL_CameraID targetId = availableCameras[targetIdx].id;
+                        if (targetId != webcam.getActiveCameraId()) {
                             uiOverlay.setStatus("Switching to: " + availableCameras[targetIdx].name + "...");
-                            if (webcam.switchCamera(targetIdx)) {
+                            if (webcam.switchCamera(targetId, targetIdx)) {
                                 uiOverlay.setStatus("Active: " + availableCameras[targetIdx].name);
                             } else {
                                 uiOverlay.setStatus("Failed to open: " + availableCameras[targetIdx].name, 3.0f, true);
@@ -402,9 +406,33 @@ int main(int argc, char** argv) {
                     }
                 }
             }
-            else if (event.type == SDL_EVENT_CAMERA_DEVICE_ADDED || event.type == SDL_EVENT_CAMERA_DEVICE_REMOVED) {
+            else if (event.type == SDL_EVENT_CAMERA_DEVICE_ADDED) {
                 availableCameras = WebcamCapture::getAvailableCameras();
-                uiOverlay.setStatus("Cameras updated (" + std::to_string(availableCameras.size()) + " detected)");
+                uiOverlay.setStatus("Camera added (" + std::to_string(availableCameras.size()) + " available)");
+            }
+            else if (event.type == SDL_EVENT_CAMERA_DEVICE_REMOVED) {
+                availableCameras = WebcamCapture::getAvailableCameras();
+                SDL_CameraID activeId = webcam.getActiveCameraId();
+                bool activeFound = false;
+                for (const auto& cam : availableCameras) {
+                    if (cam.id == activeId) {
+                        activeFound = true;
+                        break;
+                    }
+                }
+                if (!activeFound && activeId != 0) {
+                    if (!availableCameras.empty()) {
+                        fprintf(stderr, "[live] Active camera disconnected, auto-switching to %s\n", availableCameras[0].name.c_str());
+                        webcam.switchCamera(availableCameras[0].id, 0);
+                        uiOverlay.setStatus("Camera disconnected. Switched to: " + availableCameras[0].name, 4.0f, false);
+                    } else {
+                        fprintf(stderr, "[live] Active camera disconnected, no other cameras available\n");
+                        webcam.stop();
+                        uiOverlay.setStatus("Active camera disconnected! No cameras found.", 5.0f, true);
+                    }
+                } else {
+                    uiOverlay.setStatus("Cameras updated (" + std::to_string(availableCameras.size()) + " detected)");
+                }
             }
         }
 
@@ -618,7 +646,7 @@ int main(int argc, char** argv) {
         }
 
         // Camera selection & shortcuts HUD overlay
-        uiOverlay.render(bgraBuf.data(), fbWidth, fbHeight, availableCameras, webcam.getIndex(), webcam.getCurrentCameraName());
+        uiOverlay.render(bgraBuf.data(), fbWidth, fbHeight, availableCameras, webcam.getActiveCameraId(), webcam.getCurrentCameraName());
 
         SDL_Surface* fbSurface = SDL_CreateSurfaceFrom(
             fbWidth, fbHeight, SDL_PIXELFORMAT_BGRA8888, bgraBuf.data(), fbWidth * 4);
