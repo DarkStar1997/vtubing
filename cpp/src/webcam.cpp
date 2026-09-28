@@ -15,13 +15,17 @@ bool WebcamCapture::start() {
 
     int numCameras = 0;
     SDL_CameraID* cameras = SDL_GetCameras(&numCameras);
+    fprintf(stdout, "[webcam] Detected cameras: %d, selected index: %d\n", numCameras, index_);
     if (!cameras || numCameras == 0) {
         fprintf(stderr, "[webcam] No cameras found\n");
         if (cameras) SDL_free(cameras);
+        currentCameraName_ = "None";
         return false;
     }
     if (index_ >= numCameras) index_ = 0;
     SDL_CameraID devId = cameras[index_];
+    const char* cname = SDL_GetCameraName(devId);
+    currentCameraName_ = cname ? cname : ("Camera " + std::to_string(index_ + 1));
     SDL_free(cameras);
 
     SDL_CameraSpec spec = {};
@@ -49,6 +53,43 @@ void WebcamCapture::stop() {
         SDL_CloseCamera(camera_);
         camera_ = nullptr;
     }
+    std::lock_guard<std::mutex> lock(mutex_);
+    latestFrame_ = Image();
+    isNew_ = false;
+}
+
+std::vector<CameraDeviceInfo> WebcamCapture::getAvailableCameras() {
+    if (!SDL_Init(SDL_INIT_CAMERA)) {
+        return {};
+    }
+    int numCameras = 0;
+    SDL_CameraID* cameras = SDL_GetCameras(&numCameras);
+    std::vector<CameraDeviceInfo> result;
+    if (!cameras || numCameras == 0) {
+        if (cameras) SDL_free(cameras);
+        return result;
+    }
+    result.reserve(numCameras);
+    for (int i = 0; i < numCameras; i++) {
+        const char* name = SDL_GetCameraName(cameras[i]);
+        result.push_back({
+            cameras[i],
+            name ? std::string(name) : ("Camera " + std::to_string(i + 1)),
+            i
+        });
+    }
+    SDL_free(cameras);
+    return result;
+}
+
+bool WebcamCapture::switchCamera(int index) {
+    stop();
+    index_ = index;
+    return start();
+}
+
+std::string WebcamCapture::getCurrentCameraName() const {
+    return currentCameraName_.empty() ? ("Camera " + std::to_string(index_ + 1)) : currentCameraName_;
 }
 
 void WebcamCapture::loop() {
