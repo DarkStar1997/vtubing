@@ -168,6 +168,7 @@ cd cpp/build
 | Flag | Default | Description |
 |---|---|---|
 | `--models <dir>` | auto-detected | Path to MediaPipe model directory (`assets/models` or `../../assets/models` relative to the executable) |
+| `--cam <index>` | 0 | Initial webcam device index |
 | `--threads <N>` | 2 | CPU threads, minimum 2 (`0` = automatic, up to 16) |
 | `--fps <N>` | 15 | Frame-rate cap in fps (`0` = unlimited) |
 | `--no-pip` | off | Start without the webcam picture-in-picture overlay (W toggles it) |
@@ -196,8 +197,11 @@ included), leaving plenty of CPU headroom for games and OBS.
 
 | Key | Action |
 |---|---|
+| `C` | Toggle camera selection menu & keyboard shortcuts legend |
+| `1`–`9` | Directly select camera source |
+| `R` | Rescan connected camera devices |
 | `SPACE` | Calibrate (neutral pose for face, body, hands) |
-| `W` | Toggle picture-in-picture webcam overlay |
+| `W` | Toggle picture-in-picture webcam & UI overlay |
 | `ESC` | Quit |
 
 ## GPU usage

@@ -5,6 +5,7 @@
 #include "pose_tracker.h"
 #include "hand_tracker.h"
 #include "rig_solver.h"
+#include "ui_overlay.h"
 
 #include <SDL3/SDL.h>
 #include <cstdio>
@@ -55,6 +56,7 @@ int main(int argc, char** argv) {
             "  --models <dir>   Path to MediaPipe model directory\n"
             "                   (default: auto-detected: assets/models or\n"
             "                   ../../assets/models next to the executable)\n"
+            "  --cam <index>    Initial webcam device index (default: 0)\n"
             "  --threads <N>    Limit CPU threads, minimum 2 (default: 2)\n"
             "                   Use 0 for automatic (all cores, up to 16)\n"
             "  --fps <N>        Cap frame rate to reduce CPU usage (default: 15)\n"
@@ -64,8 +66,11 @@ int main(int argc, char** argv) {
             "  -h, --help       Show this help message\n"
             "\n"
             "Controls:\n"
+            "  C                Toggle camera selection menu & shortcuts legend\n"
+            "  1..9             Directly select camera source\n"
+            "  R                Rescan connected camera devices\n"
             "  SPACE            Calibrate neutral pose\n"
-            "  W                Toggle picture-in-picture overlay\n"
+            "  W                Toggle picture-in-picture & UI overlay\n"
             "  ESC              Quit\n");
     };
 
@@ -76,11 +81,13 @@ int main(int argc, char** argv) {
     // Override with --threads 0 (auto, up to 16) and --fps 0 (unlimited).
     int maxThreads = 2;
     int targetFps = 15;
+    int initialCamIndex = 0;
     bool noPip = false;  // start without the webcam picture-in-picture overlay
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--models" && i + 1 < argc) { modelDir = argv[++i]; }
+        else if (a == "--cam" && i + 1 < argc) { initialCamIndex = std::max(0, std::stoi(argv[++i])); }
         else if (a == "--threads" && i + 1 < argc) {
             maxThreads = std::stoi(argv[++i]);
             if (maxThreads != 0) maxThreads = std::max(2, maxThreads);  // 0 = auto, else minimum 2
@@ -178,10 +185,13 @@ int main(int argc, char** argv) {
     fprintf(stderr, "[live] threads: %d\n", numThreads);
     Framebuffer ssfb(renderW, renderH), fb(fbWidth, fbHeight);
 
-    WebcamCapture webcam(0, 640, 480, 30);
+    std::vector<CameraDeviceInfo> availableCameras = WebcamCapture::getAvailableCameras();
+    WebcamCapture webcam(initialCamIndex, 640, 480, 30);
     if (!webcam.start()) {
         fprintf(stderr, "[live] WARNING: webcam not available, running without tracking\n");
     }
+    UIOverlay uiOverlay;
+    uiOverlay.visible = !noPip;
 
     FaceTracker faceTracker(modelDir);
     PoseTracker poseTracker(modelDir);
@@ -358,10 +368,71 @@ int main(int argc, char** argv) {
         // Events
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_EVENT_QUIT) running = false;
-            if (event.type == SDL_EVENT_KEY_DOWN) {
+            else if (event.type == SDL_EVENT_KEY_DOWN) {
                 if (event.key.key == SDLK_ESCAPE) running = false;
-                if (event.key.key == SDLK_W) { showPiP = !showPiP; showPiPAtomic.store(showPiP); }
-                if (event.key.key == SDLK_SPACE) { calibrating = true; fprintf(stderr, "[live] Calibrating...\n"); }
+                else if (event.key.key == SDLK_W) {
+                    showPiP = !showPiP;
+                    showPiPAtomic.store(showPiP);
+                    uiOverlay.visible = showPiP;
+                    if (!uiOverlay.visible) {
+                        uiOverlay.showCameraMenu = false;
+                    }
+                }
+                else if (event.key.key == SDLK_SPACE) { calibrating = true; fprintf(stderr, "[live] Calibrating...\n"); }
+                else if (event.key.key == SDLK_C) {
+                    uiOverlay.toggleCameraMenu();
+                }
+                else if (event.key.key == SDLK_R) {
+                    availableCameras = WebcamCapture::getAvailableCameras();
+                    uiOverlay.setStatus("Rescanned cameras: " + std::to_string(availableCameras.size()) + " detected");
+                }
+                else {
+                    int targetIdx = -1;
+                    if (event.key.key >= SDLK_1 && event.key.key <= SDLK_9) {
+                        targetIdx = (int)(event.key.key - SDLK_1);
+                    } else if (event.key.key >= SDLK_KP_1 && event.key.key <= SDLK_KP_9) {
+                        targetIdx = (int)(event.key.key - SDLK_KP_1);
+                    }
+                    if (targetIdx >= 0 && targetIdx < (int)availableCameras.size()) {
+                        SDL_CameraID targetId = availableCameras[targetIdx].id;
+                        if (targetId != webcam.getActiveCameraId()) {
+                            uiOverlay.setStatus("Switching to: " + availableCameras[targetIdx].name + "...");
+                            if (webcam.switchCamera(targetId, targetIdx)) {
+                                uiOverlay.setStatus("Active: " + availableCameras[targetIdx].name);
+                            } else {
+                                uiOverlay.setStatus("Failed to open: " + availableCameras[targetIdx].name, 3.0f, true);
+                            }
+                        }
+                    }
+                }
+            }
+            else if (event.type == SDL_EVENT_CAMERA_DEVICE_ADDED) {
+                availableCameras = WebcamCapture::getAvailableCameras();
+                uiOverlay.setStatus("Camera added (" + std::to_string(availableCameras.size()) + " available)");
+            }
+            else if (event.type == SDL_EVENT_CAMERA_DEVICE_REMOVED) {
+                availableCameras = WebcamCapture::getAvailableCameras();
+                SDL_CameraID activeId = webcam.getActiveCameraId();
+                bool activeFound = false;
+                for (const auto& cam : availableCameras) {
+                    if (cam.id == activeId) {
+                        activeFound = true;
+                        break;
+                    }
+                }
+                if (!activeFound && activeId != 0) {
+                    if (!availableCameras.empty()) {
+                        fprintf(stderr, "[live] Active camera disconnected, auto-switching to %s\n", availableCameras[0].name.c_str());
+                        webcam.switchCamera(availableCameras[0].id, 0);
+                        uiOverlay.setStatus("Camera disconnected. Switched to: " + availableCameras[0].name, 4.0f, false);
+                    } else {
+                        fprintf(stderr, "[live] Active camera disconnected, no other cameras available\n");
+                        webcam.stop();
+                        uiOverlay.setStatus("Active camera disconnected! No cameras found.", 5.0f, true);
+                    }
+                } else {
+                    uiOverlay.setStatus("Cameras updated (" + std::to_string(availableCameras.size()) + " detected)");
+                }
             }
         }
 
@@ -369,6 +440,7 @@ int main(int argc, char** argv) {
         float dt = std::chrono::duration<float>(now - lastTime).count();
         lastTime = now;
         if (dt > 0.1f) dt = 0.1f;
+        uiOverlay.update(dt);
 
         // Consume async detection result (non-blocking)
         FaceResult faceResult;
@@ -572,6 +644,9 @@ int main(int argc, char** argv) {
                 }
             }
         }
+
+        // Camera selection & shortcuts HUD overlay
+        uiOverlay.render(bgraBuf.data(), fbWidth, fbHeight, availableCameras, webcam.getActiveCameraId(), webcam.getCurrentCameraName());
 
         SDL_Surface* fbSurface = SDL_CreateSurfaceFrom(
             fbWidth, fbHeight, SDL_PIXELFORMAT_BGRA8888, bgraBuf.data(), fbWidth * 4);
