@@ -6,6 +6,14 @@
 #include <algorithm>
 #include <cstdint>
 
+// Per-frame state for the on-window HUD (fps readout, calibration banner).
+struct HUDState {
+    float fps = 0.0f;           // smoothed frames per second
+    bool calibrating = false;   // calibration window active
+    int calibProgress = 0;      // frames collected so far
+    int calibTarget = 30;       // frames needed to complete
+};
+
 class UIOverlay {
 public:
     bool visible = true;
@@ -120,8 +128,19 @@ public:
         }
     }
 
-    void render(uint8_t* bgra, int fbW, int fbH, const std::vector<CameraDeviceInfo>& cameras, SDL_CameraID activeDevId, const std::string& activeName) {
+    void render(uint8_t* bgra, int fbW, int fbH, const std::vector<CameraDeviceInfo>& cameras, SDL_CameraID activeDevId, const std::string& activeName, const HUDState& hud) {
         if (!visible) return;
+
+        // 0. FPS badge at top-right
+        {
+            std::string fpsStr = std::to_string((int)(hud.fps + 0.5f)) + " fps";
+            if (hud.fps < 0.5f) fpsStr = "-- fps";
+            int badgeW = (int)fpsStr.length() * 8 + 20;
+            int badgeX = fbW - 14 - badgeW;
+            drawBoxAlpha(bgra, fbW, fbH, badgeX, 14, badgeW, 26, 18, 22, 28, 215);
+            drawBorder(bgra, fbW, fbH, badgeX, 14, badgeW, 26, 60, 75, 95, 200);
+            drawText(bgra, fbW, fbH, badgeX + 10, 23, fpsStr, 255, 205, 80, 255);
+        }
 
         // 1. Compact HUD bar at Top-Left
         const int hudX = 14;
@@ -145,7 +164,28 @@ public:
 
         int currentY = hudY + hudH + 8;
 
-        // 2. Status message badge (if active)
+        // 2. Calibration banner (while the calibration window is active)
+        if (hud.calibrating) {
+            std::string msg = (hud.calibProgress > 0)
+                ? "Calibrating... " + std::to_string(hud.calibProgress) + "/" + std::to_string(hud.calibTarget)
+                : "Calibrating... (waiting for face)";
+            const int banW = 244;
+            const int banH = 42;
+            drawBoxAlpha(bgra, fbW, fbH, hudX, currentY, banW, banH, 32, 25, 12, 235);
+            drawBorder(bgra, fbW, fbH, hudX, currentY, banW, banH, 255, 205, 80, 220);
+            drawText(bgra, fbW, fbH, hudX + 12, currentY + 7, msg, 255, 225, 150, 255);
+            // Progress bar
+            int barX = hudX + 12, barY = currentY + 26, barW = banW - 24, barH = 6;
+            drawBoxAlpha(bgra, fbW, fbH, barX, barY, barW, barH, 55, 45, 28, 255);
+            float frac = (hud.calibTarget > 0)
+                ? std::min(1.0f, (float)hud.calibProgress / (float)hud.calibTarget) : 0.0f;
+            int fillW = (int)((barW - 2) * frac);
+            if (fillW > 0)
+                drawBoxAlpha(bgra, fbW, fbH, barX + 1, barY + 1, fillW, barH - 2, 255, 205, 80, 255);
+            currentY += banH + 8;
+        }
+
+        // 3. Status message badge (if active)
         if (!statusMessage.empty() && statusTimer > 0.0f) {
             int statW = (int)statusMessage.length() * 8 + 24;
             int statH = 24;
@@ -155,7 +195,7 @@ public:
             currentY += statH + 8;
         }
 
-        // 3. Expanded Camera Menu & Shortcuts Legend (when showCameraMenu is true)
+        // 4. Expanded Camera Menu & Shortcuts Legend (when showCameraMenu is true)
         if (showCameraMenu) {
             const int menuW = 500;
             int camCount = (int)cameras.size();
@@ -223,7 +263,7 @@ public:
             drawLegendLine("[R]", "Rescan connected video devices");
             drawLegendLine("[C]", "Toggle camera menu & shortcuts");
             drawLegendLine("[W]", "Toggle PiP preview & UI overlay");
-            drawLegendLine("[SPACE]", "Calibrate neutral tracking pose");
+            drawLegendLine("[SPACE]", "Calibrate / re-calibrate tracking pose");
             drawLegendLine("[ESC]", "Quit application");
         }
     }

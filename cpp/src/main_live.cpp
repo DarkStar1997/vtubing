@@ -6,6 +6,7 @@
 #include "hand_tracker.h"
 #include "rig_solver.h"
 #include "ui_overlay.h"
+#include "logging.h"
 
 #include <SDL3/SDL.h>
 #include <cstdio>
@@ -16,6 +17,11 @@
 #include <mutex>
 #include <chrono>
 #include <filesystem>
+
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/quaternion.hpp>
 
@@ -44,6 +50,23 @@ static std::string defaultAssetPath(const char* rel) {
 }
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    // GUI-subsystem build: Windows does not open a console window for this
+    // executable. If stderr is not usable (double-click launch), try to
+    // re-attach to the parent console so --verbose / --help output shows up
+    // when launched from a terminal. If stderr IS valid (inherited console,
+    // pipe or file redirection), leave it alone.
+    {
+        HANDLE errH = GetStdHandle(STD_ERROR_HANDLE);
+        bool haveErr = (errH != NULL && errH != INVALID_HANDLE_VALUE &&
+                        GetFileType(errH) != FILE_TYPE_UNKNOWN);
+        if (!haveErr && AttachConsole(ATTACH_PARENT_PROCESS)) {
+            FILE* dummy = nullptr;
+            freopen_s(&dummy, "CONOUT$", "w", stderr);
+            freopen_s(&dummy, "CONOUT$", "w", stdout);
+        }
+    }
+#endif
     // Suppress MediaPipe verbose logs. On Linux, EGL stubs are compiled in
     // (with -rdynamic) to force pure-CPU inference.
     setEnvVar("GLOG_minloglevel", "2");
@@ -63,6 +86,9 @@ int main(int argc, char** argv) {
             "                   Use 0 for unlimited\n"
             "  --no-pip         Start without the webcam picture-in-picture\n"
             "                   overlay (W toggles it at runtime)\n"
+            "  -v, --verbose    Print diagnostics to the terminal\n"
+            "                   (default: quiet; fps and calibration status\n"
+            "                   are shown on the window instead)\n"
             "  -h, --help       Show this help message\n"
             "\n"
             "Controls:\n"
@@ -94,6 +120,7 @@ int main(int argc, char** argv) {
         }
         else if (a == "--fps" && i + 1 < argc) { targetFps = std::max(0, std::stoi(argv[++i])); }
         else if (a == "--no-pip") { noPip = true; }
+        else if (a == "-v" || a == "--verbose") { g_verbose = true; }
         else if (a == "-h" || a == "--help") { printUsage(); return 0; }
         else if (a.substr(0, 2) == "--") {
             fprintf(stderr, "Unknown option: %s\n\n", a.c_str());
@@ -113,11 +140,11 @@ int main(int argc, char** argv) {
     int ss = 2;  // 2×2 supersampling anti-aliasing (SSAA)
     int renderW = fbWidth * ss, renderH = fbHeight * ss;
 
-    fprintf(stderr, "[live] loading VRM: %s\n", vrmPath.c_str());
+    VLOG("[live] loading VRM: %s\n", vrmPath.c_str());
     VRMModel model = loadVRM(vrmPath);
     if (model.meshes.empty()) { fprintf(stderr, "Failed to load model\n"); return 1; }
-    fprintf(stderr, "[live] %d blendshape groups, headNode=%d\n",
-            (int)model.blendShapeGroups.size(), model.headNodeIndex);
+    VLOG("[live] %d blendshape groups, headNode=%d\n",
+         (int)model.blendShapeGroups.size(), model.headNodeIndex);
 
     // Compute bind-pose matrices (kept as reference)
     std::vector<glm::mat4> bindWorldMatrices = computeWorldMatrices(model);
@@ -182,15 +209,16 @@ int main(int argc, char** argv) {
 
     // Init systems
     int numThreads = (maxThreads > 0) ? maxThreads : std::min((int)std::thread::hardware_concurrency(), 16);
-    fprintf(stderr, "[live] threads: %d\n", numThreads);
+    VLOG("[live] threads: %d\n", numThreads);
     Framebuffer ssfb(renderW, renderH), fb(fbWidth, fbHeight);
 
     std::vector<CameraDeviceInfo> availableCameras = WebcamCapture::getAvailableCameras();
+    UIOverlay uiOverlay;
     WebcamCapture webcam(initialCamIndex, 640, 480, 30);
     if (!webcam.start()) {
-        fprintf(stderr, "[live] WARNING: webcam not available, running without tracking\n");
+        VLOG("[live] WARNING: webcam not available, running without tracking\n");
+        uiOverlay.setStatus("No camera - tracking disabled", 5.0f, true);
     }
-    UIOverlay uiOverlay;
     uiOverlay.visible = !noPip;
 
     FaceTracker faceTracker(modelDir);
@@ -198,7 +226,7 @@ int main(int argc, char** argv) {
     HandTracker handTracker(modelDir);
     RigSolver rigSolver(model);
 
-    fprintf(stderr, "[live] Face tracker initialized. Press SPACE to calibrate.\n");
+    VLOG("[live] Face tracker initialized. Press SPACE to calibrate.\n");
 
     // SDL window
     if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -212,6 +240,7 @@ int main(int argc, char** argv) {
     bool framingApplied = false;
     float calibFaceMinY = 1.0f, calibFaceMaxY = 0.0f;
     int calibFaceFrames = 0;
+    float smoothFps = 0.0f;  // EMA-smoothed fps for the on-window readout
     SDL_Event event;
     Image lastAnnotated;  // cached PiP frame, reused between webcam updates
     Image pipImg;         // pre-resized PiP (updated at webcam rate, not render rate)
@@ -378,7 +407,20 @@ int main(int argc, char** argv) {
                         uiOverlay.showCameraMenu = false;
                     }
                 }
-                else if (event.key.key == SDLK_SPACE) { calibrating = true; fprintf(stderr, "[live] Calibrating...\n"); }
+                else if (event.key.key == SDLK_SPACE) {
+                    if (!calibrating) {
+                        calibrating = true;
+                        // Reset framing accumulators so (re)calibration
+                        // recomputes camera framing (e.g. after switching
+                        // to a different camera with another framing).
+                        calibFaceMinY = 1.0f;
+                        calibFaceMaxY = 0.0f;
+                        calibFaceFrames = 0;
+                        framingApplied = false;
+                        rigSolver.startCalibration();
+                        VLOG("[live] Calibrating...\n");
+                    }
+                }
                 else if (event.key.key == SDLK_C) {
                     uiOverlay.toggleCameraMenu();
                 }
@@ -437,9 +479,13 @@ int main(int argc, char** argv) {
         }
 
         auto now = std::chrono::steady_clock::now();
-        float dt = std::chrono::duration<float>(now - lastTime).count();
+        float rawDt = std::chrono::duration<float>(now - lastTime).count();
         lastTime = now;
+        float dt = rawDt;
         if (dt > 0.1f) dt = 0.1f;
+        // Smoothed fps readout for the HUD (uses the unclamped delta)
+        float instFps = rawDt > 1e-4f ? 1.0f / rawDt : 0.0f;
+        smoothFps = (smoothFps <= 0.0f) ? instFps : smoothFps + (instFps - smoothFps) * 0.05f;
         uiOverlay.update(dt);
 
         // Consume async detection result (non-blocking)
@@ -476,7 +522,8 @@ int main(int argc, char** argv) {
                     calibFaceFrames++;
                     if (rigSolver.calibrated() && rigSolver.poseCalibrated()) {
                         calibrating = false;
-                        fprintf(stderr, "[live] Calibration complete.\n");
+                        VLOG("[live] Calibration complete.\n");
+                        uiOverlay.setStatus("Calibration complete");
                         // Compute framing-calibrated sitCam (matching Python avatar.js)
                         if (!framingApplied && calibFaceFrames > 0) {
                             float userFaceH = calibFaceMaxY - calibFaceMinY;
@@ -488,14 +535,14 @@ int main(int argc, char** argv) {
                             sitCam.dist = modelFaceH / (std::max(userFaceH, 0.01f) * 2.0f * tanHalf);
                             sitCam.targetY = modelFaceCenter + (2.0f * userFaceCenterY - 1.0f) * sitCam.dist * tanHalf;
                             sitCam.fov = fov;
-                            curFov = sitCam.fov;
-                            curTargetY = sitCam.targetY;
-                            curDist = sitCam.dist;
                             framingApplied = true;
-                            fprintf(stderr, "[cam] Framing applied: userFaceH=%.2f center=%.2f "
-                                    "→ sitCam(ty=%.2f,d=%.2f,fov=%.0f)\n",
-                                    userFaceH, userFaceCenterY,
-                                    sitCam.targetY, sitCam.dist, sitCam.fov);
+                            // Note: curFov/curTargetY/curDist are intentionally
+                            // left alone - the per-frame camera smoothing eases
+                            // into the new framing without a jump cut.
+                            VLOG("[cam] Framing applied: userFaceH=%.2f center=%.2f "
+                                 "→ sitCam(ty=%.2f,d=%.2f,fov=%.0f)\n",
+                                 userFaceH, userFaceCenterY,
+                                 sitCam.targetY, sitCam.dist, sitCam.fov);
                         }
                     }
                 }
@@ -646,7 +693,12 @@ int main(int argc, char** argv) {
         }
 
         // Camera selection & shortcuts HUD overlay
-        uiOverlay.render(bgraBuf.data(), fbWidth, fbHeight, availableCameras, webcam.getActiveCameraId(), webcam.getCurrentCameraName());
+        HUDState hud;
+        hud.fps = smoothFps;
+        hud.calibrating = calibrating;
+        hud.calibProgress = calibFaceFrames;
+        hud.calibTarget = 30;
+        uiOverlay.render(bgraBuf.data(), fbWidth, fbHeight, availableCameras, webcam.getActiveCameraId(), webcam.getCurrentCameraName(), hud);
 
         SDL_Surface* fbSurface = SDL_CreateSurfaceFrom(
             fbWidth, fbHeight, SDL_PIXELFORMAT_BGRA8888, bgraBuf.data(), fbWidth * 4);
@@ -659,14 +711,14 @@ int main(int argc, char** argv) {
         if (elapsed >= 2.0f) {
             float fps = frameCount / elapsed;
             float detRate = frameCount > 0 ? (float)detectCount / frameCount * 100.0f : 0.0f;
-            fprintf(stderr, "[live] %.1f fps, detect: %.0f%% (%d/%d)\n",
-                    fps, detRate, detectCount, frameCount);
+            VLOG("[live] %.1f fps, detect: %.0f%% (%d/%d)\n",
+                 fps, detRate, detectCount, frameCount);
             // Print a few blendshape values when detected
             if (faceResult.detected) {
-                fprintf(stderr, "  jawOpen=%.2f mouthSmileL=%.2f eyeBlinkL=%.2f eyeBlinkR=%.2f browInnerUp=%.2f\n",
-                    faceResult.blendshapes[25], faceResult.blendshapes[44],
-                    faceResult.blendshapes[9], faceResult.blendshapes[10],
-                    faceResult.blendshapes[1]);
+                VLOG("  jawOpen=%.2f mouthSmileL=%.2f eyeBlinkL=%.2f eyeBlinkR=%.2f browInnerUp=%.2f\n",
+                     faceResult.blendshapes[25], faceResult.blendshapes[44],
+                     faceResult.blendshapes[9], faceResult.blendshapes[10],
+                     faceResult.blendshapes[1]);
             }
             frameCount = 0;
             detectCount = 0;

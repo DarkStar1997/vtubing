@@ -73,6 +73,31 @@ RigSolver::RigSolver(const VRMModel& model) {
     }
 }
 
+void RigSolver::startCalibration() {
+    // Reset everything the accumulation window builds on, so a recalibration
+    // behaves exactly like the first calibration after application start.
+    calibratingNow_ = true;
+    calibFrames_ = 0;
+    neutralBs_.fill(0.0f);
+    neutralYaw_ = neutralPitch_ = neutralRoll_ = 0.0f;
+    poseCalibrated_ = false;
+    handsCalibrated_ = false;
+    handTwistNeutral_[0] = handTwistNeutral_[1] = 0.0f;
+    // Clear filter/smoother history so stale state from the previous session
+    // does not bleed into the new neutral.
+    for (auto& f : bsFilters_) f.reset();
+    yawFilter_.reset();
+    pitchFilter_.reset();
+    rollFilter_.reset();
+    smoothYaw_.reset();
+    smoothPitch_.reset();
+    smoothRoll_.reset();
+    // Note: pose filters (torsoFilter_, spine*, poseRotFilters_) are left
+    // running on purpose - during the window updatePose() keeps tracking the
+    // live pose so calibratePose() can snapshot a meaningful neutral at the
+    // end, instead of decayed/reset state.
+}
+
 void RigSolver::calibrate(const FaceResult& face) {
     if (calibFrames_ < CALIB_COUNT) {
         for (int i = 0; i < 52; i++)
@@ -181,15 +206,20 @@ glm::quat RigSolver::filterRot(int idx, const glm::quat& q, float dt) {
 }
 
 void RigSolver::calibratePose() {
+    // Snapshot only once the face-side accumulation window is complete, so the
+    // pose filters hold a stable reading of the calibration pose (startup and
+    // recalibration take the same path this way).
+    if (calibFrames_ < CALIB_COUNT) return;
     torsoNeutral_ = torsoFilter_.lastFiltered();
     spineYNeutral_ = spineYFilter_.lastFiltered();
     spineZNeutral_ = spineZFilter_.lastFiltered();
     handsCalibrated_ = true;
     poseCalibrated_ = true;
+    calibratingNow_ = false;
 }
 
 void RigSolver::updatePose(const PoseResult& pose, float dt) {
-    if (!calibrated_ || !pose.detected ||
+    if ((!calibrated_ && !calibratingNow_) || !pose.detected ||
         pose.lmVis(PoseLandmarkIdx::L_SHOULDER) < 0.3f ||
         pose.lmVis(PoseLandmarkIdx::R_SHOULDER) < 0.3f) {
         // Decay body pose toward neutral and reset filters

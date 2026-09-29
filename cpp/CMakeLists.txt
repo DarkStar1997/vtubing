@@ -201,6 +201,15 @@ if(UNIX)
         INSTALL_RPATH "$ORIGIN")
 endif()
 
+# Windows: build vtuber_live as a GUI-subsystem app so no console window
+# opens on double-click. mainCRTStartup keeps plain main() as the entry
+# point; at runtime the app re-attaches to the parent console when it was
+# launched from a terminal (see main_live.cpp), so --verbose still works.
+if(WIN32)
+    set_target_properties(vtuber_live PROPERTIES
+        LINK_FLAGS "/SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup")
+endif()
+
 target_compile_options(vtuber_live PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/arch:AVX2>
     $<$<CXX_COMPILER_ID:GNU,Clang>:-mavx2 -mfma -mbmi2>)
@@ -224,6 +233,27 @@ target_link_libraries(test_tracker PRIVATE
 
 if(UNIX)
     set_target_properties(test_tracker PROPERTIES
+        BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/lib"
+        INSTALL_RPATH "$ORIGIN")
+endif()
+
+# --- Calibration regression test (synthetic face, no camera needed) ---
+add_executable(test_calibration
+    src/test_calibration.cpp
+    src/rig_solver.cpp
+    ${RENDER_SOURCES})
+
+target_include_directories(test_calibration PRIVATE
+    src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${THIRD_PARTY_DIR}
+    ${bs_thread_pool_SOURCE_DIR}/include)
+
+target_link_libraries(test_calibration PRIVATE
+    glm::glm)
+
+if(UNIX)
+    set_target_properties(test_calibration PROPERTIES
         BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/lib"
         INSTALL_RPATH "$ORIGIN")
 endif()

@@ -1,4 +1,5 @@
 #include "vrm_loader.h"
+#include "logging.h"
 
 #define CGLTF_IMPLEMENTATION
 #include <cgltf.h>
@@ -518,13 +519,13 @@ VRMModel loadVRM(const std::string& path) {
 
     cgltf_free(data);
 
-    fprintf(stderr, "[vrm] loaded: %zu meshes, %zu textures, %d verts, %d tris\n",
-            model.meshes.size(), model.textures.size(),
-            model.totalVertices(), model.totalTriangles());
-    fprintf(stderr, "[vrm] nodes: %zu, joints: %zu, morph targets (mesh0 prim0): %d\n",
-            model.nodes.size(), model.jointNodes.size(),
-            model.meshes.empty() ? 0 : model.meshes[0].primitives[0].morphCount);
-    fprintf(stderr, "[vrm] bbox: [%.2f,%.2f,%.2f] to [%.2f,%.2f,%.2f]\n",
+    VLOG("[vrm] loaded: %zu meshes, %zu textures, %d verts, %d tris\n",
+         model.meshes.size(), model.textures.size(),
+         model.totalVertices(), model.totalTriangles());
+    VLOG("[vrm] nodes: %zu, joints: %zu, morph targets (mesh0 prim0): %d\n",
+         model.nodes.size(), model.jointNodes.size(),
+         model.meshes.empty() ? 0 : model.meshes[0].primitives[0].morphCount);
+    VLOG("[vrm] bbox: [%.2f,%.2f,%.2f] to [%.2f,%.2f,%.2f]\n",
             bmin.x, bmin.y, bmin.z, bmax.x, bmax.y, bmax.z);
 
     return model;

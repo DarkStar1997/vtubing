@@ -109,8 +109,9 @@ int main(int argc, char** argv) {
     // Test VRM mapping
     VRMModel vrm = loadVRM("../../assets/avatars/male_52blendshapes.vrm");
     RigSolver rig(vrm);
-    rig.calibrate(result); // single-frame "calibration" (not ideal but works for testing)
-    // Manually set calibrated
+    rig.startCalibration();
+    for (int i = 0; i < 30; i++) rig.calibrate(result);  // 30-frame window
+    rig.calibratePose();
     rig.update(result, 0.016f);
 
     fprintf(stderr, "\n  VRM morph weights (non-zero):\n");

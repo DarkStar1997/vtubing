@@ -1,4 +1,5 @@
 #include "webcam.h"
+#include "logging.h"
 #include <chrono>
 #include <cstdio>
 
@@ -48,8 +49,8 @@ bool WebcamCapture::start(SDL_CameraID targetId) {
     }
 
     const char* cname = SDL_GetCameraName(devId);
-    fprintf(stderr, "[webcam] Detected cameras: %d, opened index: %d (%s)\n",
-            numCameras, index_, cname ? cname : "Camera");
+    VLOG("[webcam] Detected cameras: %d, opened index: %d (%s)\n",
+         numCameras, index_, cname ? cname : "Camera");
     SDL_free(cameras);
 
     SDL_CameraSpec spec = {};

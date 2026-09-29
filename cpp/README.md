@@ -172,6 +172,7 @@ cd cpp/build
 | `--threads <N>` | 2 | CPU threads, minimum 2 (`0` = automatic, up to 16) |
 | `--fps <N>` | 15 | Frame-rate cap in fps (`0` = unlimited) |
 | `--no-pip` | off | Start without the webcam picture-in-picture overlay (W toggles it) |
+| `-v`, `--verbose` | off | Print diagnostics to the terminal (default: quiet; fps and calibration status are shown on the window) |
 | `[vrm_file]` | auto-detected | VRM avatar to load (`assets/avatars/male_52blendshapes.vrm`) |
 
 By default the app runs lightweight: 2 threads and a 15 fps cap (tracking
@@ -200,8 +201,8 @@ included), leaving plenty of CPU headroom for games and OBS.
 | `C` | Toggle camera selection menu & keyboard shortcuts legend |
 | `1`–`9` | Directly select camera source |
 | `R` | Rescan connected camera devices |
-| `SPACE` | Calibrate (neutral pose for face, body, hands) |
-| `W` | Toggle picture-in-picture webcam & UI overlay |
+| `SPACE` | Calibrate / re-calibrate neutral pose (face, body, hands) and camera framing |
+| `W` | Toggle picture-in-picture webcam & UI overlay (incl. fps readout and calibration banner) |
 | `ESC` | Quit |
 
 ## GPU usage

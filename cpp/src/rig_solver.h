@@ -32,6 +32,10 @@ public:
     void updateHands(const HandResult& left, const HandResult& right, float dt);
     void calibrate(const FaceResult& face);
     void calibratePose();
+    // Begin a fresh (re)calibration: resets accumulators and filter history so
+    // the result matches a freshly started application. Must be called before
+    // feeding calibrate()/calibratePose() frames for a new neutral pose.
+    void startCalibration();
     bool calibrated() const { return calibrated_; }
     bool poseCalibrated() const { return poseCalibrated_; }
 
@@ -71,6 +75,7 @@ private:
     int calibFrames_ = 0;
     static constexpr int CALIB_COUNT = 30;
     bool calibrated_ = false;
+    bool calibratingNow_ = false;   // active accumulation window
 
     std::vector<float> morphWeights_;
     glm::quat headRot_ = glm::quat(1, 0, 0, 0);

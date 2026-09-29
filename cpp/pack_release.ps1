@@ -95,8 +95,8 @@ No installer, nothing to install - everything needed is inside this zip.
 
 1. Extract the whole zip anywhere (keep the folder structure intact).
 2. Double-click ``vtuber_live.exe``.
-3. Sit in frame, press **SPACE** and hold still for ~1 second to calibrate
-   your neutral pose. That's it.
+3. Sit in frame, press **SPACE** and hold still for ~1 second - an on-screen
+   progress bar shows when calibration is done. That's it.
 
 ## Controls
 
@@ -105,8 +105,8 @@ No installer, nothing to install - everything needed is inside this zip.
 | C | Toggle camera selection menu & keyboard shortcuts legend |
 | 1-9 | Directly select camera source |
 | R | Rescan connected camera devices |
-| SPACE | Calibrate neutral pose (face, body, hands) |
-| W | Toggle webcam picture-in-picture & UI overlay |
+| SPACE | Calibrate / re-calibrate neutral pose (face, body, hands) and camera framing |
+| W | Toggle webcam picture-in-picture & UI overlay (incl. fps readout and calibration banner) |
 | ESC | Quit |
 
 ## Performance
@@ -116,6 +116,10 @@ of headroom for games and OBS. For more responsiveness, run from a terminal:
 
     vtuber_live.exe --threads 0 --fps 0     full quality (all cores, uncapped)
     vtuber_live.exe --threads 4 --fps 30    something in between
+
+The app is quiet by default (no console window opens). For a diagnostic log:
+
+    vtuber_live.exe --verbose
 
 ## Try other avatars
 
