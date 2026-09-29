@@ -32,8 +32,7 @@ $stage   = Join-Path $distDir $pkgName
 $zipPath = Join-Path $distDir "$pkgName.zip"
 
 # --- Verify build outputs -------------------------------------------------
-foreach ($n in @('vtuber_live.exe', 'vtuber_cpu.exe', 'test_tracker.exe',
-                 'SDL3.dll', 'libmediapipe.dll')) {
+foreach ($n in @('vtuber_live.exe', 'SDL3.dll', 'libmediapipe.dll')) {
     if (-not (Test-Path (Join-Path $BuildDir $n))) {
         throw "Missing '$n' in '$BuildDir'. Build first: cmake --build build"
     }
@@ -69,7 +68,9 @@ if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Path (Join-Path $stage 'assets\models'),
                                   (Join-Path $stage 'assets\avatars') -Force | Out-Null
 
-Copy-Item (Join-Path $BuildDir '*.exe') $stage
+# Ship only the live app; vtuber_cpu / test_tracker / test_calibration are
+# developer tools and stay out of the release package.
+Copy-Item (Join-Path $BuildDir 'vtuber_live.exe') $stage
 Copy-Item (Join-Path $BuildDir 'SDL3.dll'), (Join-Path $BuildDir 'libmediapipe.dll') $stage
 Copy-Item (Join-Path $CrtDir '*.dll') $stage
 $taskFiles | Copy-Item -Destination (Join-Path $stage 'assets\models')
@@ -128,13 +129,6 @@ Four VRM models are bundled. Any ``.vrm`` file works (VRM 0.x and 1.0):
     vtuber_live.exe assets\avatars\DefaultSampleAvatar.vrm
     vtuber_live.exe assets\avatars\hair_sample_male.vrm
     vtuber_live.exe assets\avatars\masc_vroid.vrm
-
-## Included tools (optional)
-
-- ``vtuber_cpu.exe`` - offline render benchmark:
-  ``vtuber_cpu.exe --bench 30 --ss 2``
-- ``test_tracker.exe`` - face detection test on a photo:
-  ``test_tracker.exe photo.jpg``
 
 ## Troubleshooting
 
