@@ -82,6 +82,46 @@ install_name_tool -add_rpath "@executable_path" "$EXE"
 # install_name_tool invalidates the signature; re-sign ad-hoc (mandatory on arm64)
 codesign -f -s - "$EXE" >/dev/null 2>&1
 
+# --- macOS .app bundle (double-click launches without opening Terminal) -----
+APP_NAME="VTuber Live.app"
+APP_DIR="$STAGE/$APP_NAME"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Frameworks" "$APP_DIR/Contents/Resources"
+cp "$BUILD_DIR/vtuber_live" "$APP_DIR/Contents/MacOS/vtuber_live"
+chmod +x "$APP_DIR/Contents/MacOS/vtuber_live"
+cp "$SDL_DYLIB" "$APP_DIR/Contents/Frameworks/"
+cp "$CPP_DIR/lib/libmediapipe.dylib" "$APP_DIR/Contents/Frameworks/"
+ln -sf libmediapipe.dylib "$APP_DIR/Contents/Frameworks/libmediapipe_source.so"
+
+cat > "$APP_DIR/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>VTuber Live</string>
+    <key>CFBundleDisplayName</key><string>VTuber Live</string>
+    <key>CFBundleIdentifier</key><string>com.darkstar1997.vtuber-live</string>
+    <key>CFBundleVersion</key><string>$VERSION</string>
+    <key>CFBundleShortVersionString</key><string>$VERSION</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleExecutable</key><string>vtuber_live</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSCameraUsageDescription</key><string>VTuber Live uses the camera to track your face, hands and body to animate your avatar. Video is processed locally and never leaves your device.</string>
+</dict>
+</plist>
+EOF
+
+# Bundled executable resolves dylibs from Contents/Frameworks
+BEXE="$APP_DIR/Contents/MacOS/vtuber_live"
+while IFS= read -r rp; do
+    [ -n "$rp" ] && install_name_tool -delete_rpath "$rp" "$BEXE"
+done < <(otool -l "$BEXE" | awk '/LC_RPATH/{f=1} f && / path / {print $2; f=0}')
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$BEXE"
+# Sign inside-out: executable first, then the bundle
+codesign -f -s - "$BEXE" >/dev/null 2>&1
+codesign -f -s - "$APP_DIR" >/dev/null 2>&1
+
 # --- Release README ----------------------------------------------------------
 cat > "$STAGE/README.md" <<EOF
 # VTuber CPU - macOS Release v$VERSION (Apple Silicon)
@@ -100,8 +140,10 @@ No installer, nothing to install - everything needed is inside this zip.
 ## Quick start
 
 1. Extract the whole zip anywhere (keep the folder structure intact).
-2. The first launch needs a one-time Gatekeeper approval because the binary
-   is unsigned (see below).
+2. Double-click **VTuber Live.app**. The package is unsigned, so the first
+   launch needs a one-time Gatekeeper approval (see below), and macOS asks
+   for camera access - click **Allow**. Video is processed locally and
+   never leaves your device.
 3. Sit in frame, press **SPACE** and hold still for ~1 second - an on-screen
    progress bar shows when calibration is done. That's it.
 
@@ -110,11 +152,11 @@ No installer, nothing to install - everything needed is inside this zip.
 The app is not signed with an Apple Developer certificate. On first run,
 either:
 
-- Right-click (or Control-click) \`vtuber_live\` and choose **Open** →
+- Right-click (or Control-click) **VTuber Live.app** and choose **Open** →
   **Open** in the dialog, or
 - Remove the quarantine attribute once from a terminal:
 
-      xattr -d com.apple.quarantine vtuber_live
+      xattr -dr com.apple.quarantine "VTuber Live.app"
 
 macOS also asks for camera permission on first launch - click **Allow**.
 
@@ -205,6 +247,8 @@ fi
 # Running --help from the stage proves every dylib resolves via
 # @executable_path (no build-tree fallbacks remain in the binary).
 (cd "$STAGE" && ./vtuber_live --help >/dev/null)
+# Bundled executable must resolve dylibs via @executable_path/../Frameworks
+(cd "$APP_DIR/Contents/MacOS" && ./vtuber_live --help >/dev/null)
 
 # --- Zip (ditto preserves permissions and symlinks) ---------------------------
 rm -f "$ZIP_PATH"

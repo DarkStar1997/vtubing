@@ -103,10 +103,19 @@ third-party notices), run from `cpp/`:
 ./pack_release.sh -v 0.4.0
 ```
 
-The zip lands in `dist/`. Binaries are ad-hoc signed (mandatory on arm64);
-they are not notarized, so users bypass Gatekeeper once (right-click →
-*Open*, or `xattr -d com.apple.quarantine vtuber_live`) — see the packaged
+The zip lands in `dist/`. It contains both a double-clickable
+**VTuber Live.app** bundle (dylibs under `Contents/Frameworks`, with
+`NSCameraUsageDescription` set) and a plain `vtuber_live` binary for
+terminal use. Binaries are ad-hoc signed (mandatory on arm64); they are
+not notarized, so users bypass Gatekeeper once (right-click → *Open*, or
+`xattr -dr com.apple.quarantine "VTuber Live.app"`) — see the packaged
 README.
+
+The app is silent by default: the MediaPipe library's glog diagnostics
+(INFO/WARNING lines) go to stderr and ignore `GLOG_minloglevel`, so in
+non-verbose mode the launcher redirects stdout/stderr to `/dev/null`
+(critical errors keep a private handle on the real stderr). Pass
+`--verbose` for the full diagnostic log.
 
 ### Signing the release binaries
 

@@ -21,6 +21,9 @@
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/quaternion.hpp>
@@ -41,6 +44,9 @@ static std::string defaultAssetPath(const char* rel) {
     if (const char* base = SDL_GetBasePath()) {
         candidates.push_back(std::string(base) + rel);                // release layout
         candidates.push_back(std::string(base) + "../../" + rel);     // build tree
+        // macOS .app bundle: SDL_GetBasePath() is Contents/Resources/,
+        // assets sit next to the .app bundle in the release zip
+        candidates.push_back(std::string(base) + "../../../" + rel);
     }
     candidates.push_back(std::string("../../") + rel);                // legacy CWD default
     candidates.push_back(rel);                                        // CWD (release layout)
@@ -144,13 +150,35 @@ int main(int argc, char** argv) {
         setEnvVar("TF_NUM_INTEROP_THREADS", "1");
     }
 
+    // Quiet mode: the MediaPipe library prints glog diagnostics (I/W lines)
+    // to stderr and does not honor GLOG_minloglevel, so redirect stdout and
+    // stderr to /dev/null unless --verbose was requested. Critical errors
+    // keep a private handle on the real stderr (ELOG in logging.h). --help
+    // and option errors printed above are unaffected. macOS note: when the
+    // app bundle is double-clicked there is no terminal at all; this covers
+    // launches from a terminal.
+#ifndef _WIN32
+    if (!g_verbose) {
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            fflush(stdout);
+            fflush(stderr);
+            int savedErr = dup(STDERR_FILENO);
+            if (savedErr >= 0) g_real_err = fdopen(savedErr, "w");
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+    }
+#endif
+
     int fbWidth = 1280, fbHeight = 720;
     int ss = 2;  // 2×2 supersampling anti-aliasing (SSAA)
     int renderW = fbWidth * ss, renderH = fbHeight * ss;
 
     VLOG("[live] loading VRM: %s\n", vrmPath.c_str());
     VRMModel model = loadVRM(vrmPath);
-    if (model.meshes.empty()) { fprintf(stderr, "Failed to load model\n"); return 1; }
+    if (model.meshes.empty()) { ELOG("Failed to load model\n"); return 1; }
     VLOG("[live] %d blendshape groups, headNode=%d\n",
          (int)model.blendShapeGroups.size(), model.headNodeIndex);
 
@@ -238,7 +266,7 @@ int main(int argc, char** argv) {
 
     // SDL window
     if (!SDL_Init(SDL_INIT_VIDEO)) {
-        fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+        ELOG("SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
     SDL_Window* window = SDL_CreateWindow("VTuber Live", fbWidth, fbHeight, 0);
@@ -472,11 +500,11 @@ int main(int argc, char** argv) {
                 }
                 if (!activeFound && activeId != 0) {
                     if (!availableCameras.empty()) {
-                        fprintf(stderr, "[live] Active camera disconnected, auto-switching to %s\n", availableCameras[0].name.c_str());
+                        VLOG("[live] Active camera disconnected, auto-switching to %s\n", availableCameras[0].name.c_str());
                         webcam.switchCamera(availableCameras[0].id, 0);
                         uiOverlay.setStatus("Camera disconnected. Switched to: " + availableCameras[0].name, 4.0f, false);
                     } else {
-                        fprintf(stderr, "[live] Active camera disconnected, no other cameras available\n");
+                        VLOG("[live] Active camera disconnected, no other cameras available\n");
                         webcam.stop();
                         uiOverlay.setStatus("Active camera disconnected! No cameras found.", 5.0f, true);
                     }
