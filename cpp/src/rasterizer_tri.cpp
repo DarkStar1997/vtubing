@@ -1,5 +1,8 @@
 #include "rasterizer_internal.h"
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
 #include <immintrin.h>
+#define VT_X86_SSE 1
+#endif
 #include <algorithm>
 #include <cmath>
 
@@ -157,8 +160,13 @@ void rasterizeTri(
                     if (!depthTest || z < fb.depth[pixIdx]) {
 
                         float nlen2 = nx*nx + ny*ny + nz*nz;
+#ifdef VT_X86_SSE
                         __m128 tmp = _mm_rsqrt_ss(_mm_set_ss(nlen2));
                         float invNlen = _mm_cvtss_f32(tmp);
+#else
+                        // Portable fallback (exact reciprocal sqrt)
+                        float invNlen = 1.0f / std::sqrt(nlen2);
+#endif
                         float nnx = nx * invNlen, nny = ny * invNlen, nnz = nz * invNlen;
 
                         float diffR = bcr, diffG = bcg, diffB = bcb;

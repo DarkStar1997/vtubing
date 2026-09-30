@@ -66,6 +66,10 @@ if(WIN32)
     set(MP_DLL ${CMAKE_CURRENT_SOURCE_DIR}/lib/libmediapipe.dll)
     set(MP_LIB ${CMAKE_CURRENT_SOURCE_DIR}/lib/libmediapipe.lib)
     set(MP_VENV_PATH .venv/Lib/site-packages/mediapipe/tasks/c/libmediapipe.dll)
+elseif(APPLE)
+    set(MP_DLL)
+    set(MP_LIB ${CMAKE_CURRENT_SOURCE_DIR}/lib/libmediapipe.dylib)
+    set(MP_VENV_PATH .venv/lib/python3.12/site-packages/mediapipe/tasks/c/libmediapipe.dylib)
 else()
     set(MP_DLL)
     set(MP_LIB ${CMAKE_CURRENT_SOURCE_DIR}/lib/libmediapipe.so)
@@ -116,8 +120,13 @@ else()
     if(NOT EXISTS ${MP_LIB})
         set(MP_VENV_CANDIDATE ${CMAKE_SOURCE_DIR}/../${MP_VENV_PATH})
         if(NOT EXISTS ${MP_VENV_CANDIDATE})
-            file(GLOB MP_VENV_GLOB
-                ${CMAKE_SOURCE_DIR}/../.venv/lib/python*/site-packages/mediapipe/tasks/c/libmediapipe.so)
+            if(APPLE)
+                file(GLOB MP_VENV_GLOB
+                    ${CMAKE_SOURCE_DIR}/../.venv/lib/python*/site-packages/mediapipe/tasks/c/libmediapipe.dylib)
+            else()
+                file(GLOB MP_VENV_GLOB
+                    ${CMAKE_SOURCE_DIR}/../.venv/lib/python*/site-packages/mediapipe/tasks/c/libmediapipe.so)
+            endif()
             list(GET MP_VENV_GLOB 0 MP_VENV_CANDIDATE)
         endif()
         if(MP_VENV_CANDIDATE AND EXISTS ${MP_VENV_CANDIDATE})
@@ -130,7 +139,16 @@ else()
                 "https://docs.astral.sh/uv/ if needed). This creates .venv/ with\n"
                 "the mediapipe wheel; re-run CMake and the library will be copied\n"
                 "automatically. Manual copy:\n"
-                "  cp .venv/lib/python3.*/site-packages/mediapipe/tasks/c/libmediapipe.so cpp/lib/")
+                "  cp .venv/lib/python3.*/site-packages/mediapipe/tasks/c/libmediapipe.* cpp/lib/")
+        endif()
+    endif()
+    if(APPLE)
+        # The macOS wheel's dylib carries install name "@rpath/libmediapipe_source.so";
+        # executables linked against it record that name as their dependency.
+        # Provide the name as a symlink so rpath resolution finds the library.
+        if(EXISTS ${MP_LIB} AND NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/lib/libmediapipe_source.so)
+            file(CREATE_LINK libmediapipe.dylib
+                ${CMAKE_CURRENT_SOURCE_DIR}/lib/libmediapipe_source.so SYMBOLIC)
         endif()
     endif()
 endif()
@@ -138,6 +156,16 @@ endif()
 if(MSVC)
     # cgltf/stb use fopen and other POSIX-named CRT functions
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+endif()
+
+# AVX2 + FMA support (x86_64 only; Apple Silicon / other archs build portable code)
+set(VT_SIMD_OPTS)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    if(MSVC)
+        list(APPEND VT_SIMD_OPTS /arch:AVX2)
+    else()
+        list(APPEND VT_SIMD_OPTS -mavx2 -mfma -mbmi2)
+    endif()
 endif()
 
 
@@ -159,10 +187,8 @@ target_include_directories(vtuber_cpu PRIVATE
 
 target_link_libraries(vtuber_cpu PRIVATE SDL3::SDL3 glm::glm)
 
-# AVX2 + FMA support
-target_compile_options(vtuber_cpu PRIVATE
-    $<$<CXX_COMPILER_ID:MSVC>:/arch:AVX2>
-    $<$<CXX_COMPILER_ID:GNU,Clang>:-mavx2 -mfma -mbmi2>)
+# AVX2 + FMA support (x86_64 only, see VT_SIMD_OPTS above)
+target_compile_options(vtuber_cpu PRIVATE ${VT_SIMD_OPTS})
 
 # --- Live tracking target (webcam + MediaPipe inference + real-time render) ---
 set(VTUBER_LIVE_SOURCES
@@ -173,9 +199,10 @@ set(VTUBER_LIVE_SOURCES
     src/hand_tracker.cpp
     src/rig_solver.cpp
     ${RENDER_SOURCES})
-if(NOT WIN32)
+if(UNIX AND NOT APPLE)
     # EGL symbol stubs force MediaPipe onto pure-CPU path on Linux (compiled
-    # in with -rdynamic so they override libEGL at link time).
+    # in with -rdynamic so they override libEGL at link time). macOS has no
+    # EGL and the frameworks-based wheel does not need this.
     list(APPEND VTUBER_LIVE_SOURCES src/egl_stub.c)
 endif()
 
@@ -187,7 +214,7 @@ target_include_directories(vtuber_live PRIVATE
     ${THIRD_PARTY_DIR}
     ${bs_thread_pool_SOURCE_DIR}/include)
 
-if(NOT WIN32)
+if(UNIX AND NOT APPLE)
     target_link_options(vtuber_live PRIVATE -rdynamic)
 endif()
 
@@ -199,6 +226,10 @@ if(UNIX)
     set_target_properties(vtuber_live PROPERTIES
         BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/lib"
         INSTALL_RPATH "$ORIGIN")
+    if(APPLE)
+        # ld64 resolves "@loader_path"; $ORIGIN support varies by linker version
+        set_target_properties(vtuber_live PROPERTIES INSTALL_RPATH "@loader_path")
+    endif()
 endif()
 
 # Windows: build vtuber_live as a GUI-subsystem app so no console window
@@ -210,9 +241,7 @@ if(WIN32)
         LINK_FLAGS "/SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup")
 endif()
 
-target_compile_options(vtuber_live PRIVATE
-    $<$<CXX_COMPILER_ID:MSVC>:/arch:AVX2>
-    $<$<CXX_COMPILER_ID:GNU,Clang>:-mavx2 -mfma -mbmi2>)
+target_compile_options(vtuber_live PRIVATE ${VT_SIMD_OPTS})
 
 # --- Test tracker target (static image inference) ---
 add_executable(test_tracker
@@ -235,6 +264,9 @@ if(UNIX)
     set_target_properties(test_tracker PROPERTIES
         BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/lib"
         INSTALL_RPATH "$ORIGIN")
+    if(APPLE)
+        set_target_properties(test_tracker PROPERTIES INSTALL_RPATH "@loader_path")
+    endif()
 endif()
 
 # --- Calibration regression test (synthetic face, no camera needed) ---
