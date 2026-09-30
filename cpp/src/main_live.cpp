@@ -80,8 +80,11 @@ int main(int argc, char** argv) {
             "                   (default: auto-detected: assets/models or\n"
             "                   ../../assets/models next to the executable)\n"
             "  --cam <index>    Initial webcam device index (default: 0)\n"
-            "  --threads <N>    Limit CPU threads, minimum 2 (default: 2)\n"
-            "                   Use 0 for automatic (all cores, up to 16)\n"
+            "  --threads <N>    Renderer worker threads, minimum 2 (default: 2)\n"
+            "                   Use 0 for automatic (all cores, up to 16).\n"
+            "                   Tracking (MediaPipe) manages its own threads;\n"
+            "                   overall usage stays around 1 core at the\n"
+            "                   default frame cap\n"
             "  --fps <N>        Cap frame rate to reduce CPU usage (default: 15)\n"
             "                   Use 0 for unlimited\n"
             "  --no-pip         Start without the webcam picture-in-picture\n"
@@ -131,6 +134,11 @@ int main(int argc, char** argv) {
     }
 
     if (maxThreads > 0) {
+        // Best-effort caps for OpenMP / TensorFlow-based backends. Measured
+        // note: the MediaPipe C library sizes its XNNPACK and fiber pools from
+        // the CPU count and ignores these variables; total usage stays around
+        // one core at the default 15 fps cap because tracking and rendering
+        // are serialized. --threads bounds the renderer's worker count.
         setEnvVar("OMP_NUM_THREADS", std::to_string(maxThreads).c_str());
         setEnvVar("TF_NUM_INTRAOP_THREADS", std::to_string(maxThreads).c_str());
         setEnvVar("TF_NUM_INTEROP_THREADS", "1");

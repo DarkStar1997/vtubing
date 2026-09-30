@@ -203,14 +203,26 @@ cd cpp/build
 |---|---|---|
 | `--models <dir>` | auto-detected | Path to MediaPipe model directory (`assets/models` or `../../assets/models` relative to the executable) |
 | `--cam <index>` | 0 | Initial webcam device index |
-| `--threads <N>` | 2 | CPU threads, minimum 2 (`0` = automatic, up to 16) |
+| `--threads <N>` | 2 | Renderer worker threads, minimum 2 (`0` = automatic, up to 16) |
 | `--fps <N>` | 15 | Frame-rate cap in fps (`0` = unlimited) |
 | `--no-pip` | off | Start without the webcam picture-in-picture overlay (W toggles it) |
 | `-v`, `--verbose` | off | Print diagnostics to the terminal (default: quiet; fps and calibration status are shown on the window) |
 | `[vrm_file]` | auto-detected | VRM avatar to load (`assets/avatars/male_52blendshapes.vrm`) |
 
-By default the app runs lightweight: 2 threads and a 15 fps cap (tracking
-included), leaving plenty of CPU headroom for games and OBS.
+By default the app runs lightweight: 2 renderer worker threads and a 15 fps
+cap (tracking included), leaving plenty of CPU headroom for games and OBS.
+
+### Thread & CPU usage
+
+The MediaPipe C library sizes its internal thread pools from the CPU count
+(look for `Fiber init: ... concurrency = N` in the log) and offers no knob to
+change that — `--threads` only bounds the renderer's worker tasks, and the
+`OMP_NUM_THREADS` / `TF_NUM_*` environment variables are not honored by
+MediaPipe's XNNPACK delegate. This is idle capacity, not consumption: the
+pools sit parked between frames. Measured on an Apple M4 (10 cores), whole
+process: ~0.85 core at the default 15 fps cap, ~0.9 core fully uncapped
+(`--threads 0 --fps 0`) — tracking and rendering are serialized, so real
+usage stays around one core regardless of pool size.
 
 ### Examples
 

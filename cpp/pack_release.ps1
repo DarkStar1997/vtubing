@@ -112,8 +112,9 @@ No installer, nothing to install - everything needed is inside this zip.
 
 ## Performance
 
-Runs lightweight by default: 2 CPU threads and a 15 fps cap, leaving plenty
-of headroom for games and OBS. For more responsiveness, run from a terminal:
+Runs lightweight by default - a 15 fps cap and roughly a one-core budget -
+leaving plenty of headroom for games and OBS. For more responsiveness, run
+from a terminal:
 
     vtuber_live.exe --threads 0 --fps 0     full quality (all cores, uncapped)
     vtuber_live.exe --threads 4 --fps 30    something in between
