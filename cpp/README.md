@@ -75,6 +75,39 @@ powershell -ExecutionPolicy Bypass -File pack_release.ps1 -Version 0.1.0
 The zip lands in `dist/` and runs on any Windows 10/11 x64 machine — no
 VC++ Redistributable install required.
 
+### Setup on macOS 14+ (Apple Silicon)
+
+1. **Install tools**: Xcode Command Line Tools plus CMake and Ninja:
+   ```bash
+   xcode-select --install
+   brew install cmake ninja
+   ```
+
+2. **Get libmediapipe.dylib** — from the repo root run `uv sync` (see above);
+   CMake copies the dylib from `.venv/` into `cpp/lib/` automatically at
+   configure time (a `libmediapipe_source.so` symlink is created next to it
+   to match the wheel dylib's install name).
+
+3. **Configure and build**:
+   ```bash
+   cd cpp
+   cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+   cmake --build build
+   ```
+
+Binaries target macOS 14+ on arm64. For a self-contained macOS release zip
+(executable, dylibs with `@executable_path` rpaths, models, avatars, README,
+third-party notices), run from `cpp/`:
+
+```bash
+./pack_release.sh -v 0.4.0
+```
+
+The zip lands in `dist/`. Binaries are ad-hoc signed (mandatory on arm64);
+they are not notarized, so users bypass Gatekeeper once (right-click →
+*Open*, or `xattr -d com.apple.quarantine vtuber_live`) — see the packaged
+README.
+
 ### Signing the release binaries
 
 Unsigned binaries trigger SmartScreen ("Windows protected your PC") and
@@ -108,7 +141,8 @@ warnings for end users.
 ### MediaPipe shared library
 
 The pre-built MediaPipe C API library must be present in `cpp/lib/`
-(`libmediapipe.so` on Linux, `libmediapipe.dll` on Windows). Running
+(`libmediapipe.so` on Linux, `libmediapipe.dylib` on macOS,
+`libmediapipe.dll` on Windows). Running
 `uv sync` in the repo root installs the `mediapipe` wheel into `.venv/`,
 and CMake automatically copies the library from there into `cpp/lib/`
 at configure time:
