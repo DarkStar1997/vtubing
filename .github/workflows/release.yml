@@ -196,6 +196,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # gh release create shells out to git to resolve --target; a checkout
+      # is required for it to work.
+      - uses: actions/checkout@v7
+
       - name: Normalize version
         shell: bash
         env:
