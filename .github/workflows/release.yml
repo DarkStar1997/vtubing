@@ -58,10 +58,13 @@ jobs:
         include:
           - name: linux-x86_64
             os: ubuntu-24.04
+            ext: tar.gz
           - name: windows-x64
             os: windows-latest
+            ext: zip
           - name: macos-arm64
             os: macos-latest
+            ext: zip
     steps:
       - name: Normalize version
         shell: bash
@@ -186,7 +189,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: bundle-${{ matrix.name }}
-          path: dist/*
+          # Only the packed archive — the pack scripts also leave their
+          # staging directories under dist/, which must not enter the
+          # artifact.
+          path: dist/*.${{ matrix.ext }}
           if-no-files-found: error
           retention-days: 7
 
@@ -233,5 +239,6 @@ jobs:
                 --generate-notes --target "$GITHUB_SHA")
           if [ "${{ inputs.prerelease }}" = "true" ]; then args+=(--prerelease); fi
           if [ "${{ inputs.make_latest }}" = "true" ]; then args+=(--latest); else args+=(--latest=false); fi
-          gh release create "$TAG" dist/* "${args[@]}"
+          # Upload only archives; never staging directories.
+          gh release create "$TAG" dist/*.tar.gz dist/*.zip "${args[@]}"
           gh release view "$TAG"
