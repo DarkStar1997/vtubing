@@ -111,6 +111,19 @@ not notarized, so users bypass Gatekeeper once (right-click → *Open*, or
 `xattr -dr com.apple.quarantine "VTuber Live.app"`) — see the packaged
 README.
 
+#### Linux
+
+For a self-contained Linux release tarball (executable, SDL3/MediaPipe
+libraries with an `$ORIGIN` rpath, models, avatars, README, third-party
+notices), run from `cpp/` (`patchelf` is required):
+
+```bash
+./pack_release_linux.sh -v 0.4.0
+```
+
+The tarball lands in `dist/` and runs on any x86-64 Linux with AVX2 and a
+glibc as new as the build machine's (CI builds on Ubuntu 24.04 → glibc 2.39).
+
 The app is silent by default: the MediaPipe library's glog diagnostics
 (INFO/WARNING lines) go to stderr and ignore `GLOG_minloglevel`, so in
 non-verbose mode the launcher redirects stdout/stderr to `/dev/null`
@@ -146,6 +159,33 @@ projects:
 
 Self-signed certificates exercise the pipeline but do not remove SmartScreen
 warnings for end users.
+
+### Building releases via GitHub Actions
+
+The [`release` workflow](../.github/workflows/release.yml) builds all three
+platforms on GitHub Actions and publishes the bundles as a GitHub release —
+no local toolchain needed:
+
+```bash
+gh workflow run release.yml -f version=v0.4.0
+# optional: -f prerelease=true -f make_latest=false
+gh run watch        # monitor progress
+```
+
+Each platform job syncs the mediapipe wheel (`uv sync`), downloads the
+tracking models and VRM avatars, builds (SDL3 is fetched via FetchContent),
+smoke-tests the binaries (renderer benchmark everywhere, plus a headless
+`vtuber_live` run on Linux/macOS), and then runs the platform pack script —
+`pack_release.ps1` on Windows (exe, DLLs, app-local MSVC CRT), `pack_release.sh`
+on macOS (binary, dylibs, `.app` bundle, ad-hoc signed) and
+`pack_release_linux.sh` on Linux (binary, libs, `$ORIGIN` rpath). The pack
+scripts verify each staged bundle is self-contained before it is uploaded,
+and the workflow finally creates the release with the three bundles attached.
+
+macOS is arm64-only: the `mediapipe` wheel — which provides the prebuilt
+MediaPipe C library — has no macOS x86_64 build. Windows binaries from CI are
+unsigned; for Authenticode signing, build and pack locally with
+`pack_release.ps1 -SignPfx` (see above).
 
 ### MediaPipe shared library
 
