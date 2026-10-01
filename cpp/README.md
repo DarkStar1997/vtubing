@@ -261,7 +261,7 @@ cd cpp/build
 | `--cam <index>` | 0 | Initial webcam device index |
 | `--threads <N>` | 2 | Renderer worker threads, minimum 2 (`0` = automatic, up to 16) |
 | `--fps <N>` | 15 | Frame-rate cap in fps (`0` = unlimited) |
-| `--bg <mode>` | white | Background: `white`, `black`, `green` (chroma key for OBS), or `transparent` (alpha screenshots; shown as a checkerboard, `P` saves PNGs with real alpha). Also changeable at runtime in the settings panel. |
+| `--bg <mode>` | transparent | Background: `white`, `black`, `green` (chroma key for OBS), or `transparent` (alpha screenshots; shown as a checkerboard, `P` saves PNGs with real alpha). Also changeable at runtime in the settings panel. |
 | `--no-pip` | off | Start without the webcam picture-in-picture overlay (W toggles it) |
 | `--no-spring` | off | Start with springbones disabled (hair/clothes physics; toggle at runtime in [S] Settings) |
 | `-v`, `--verbose` | off | Print diagnostics to the terminal (default: quiet; fps and calibration status are shown on the window) |
@@ -326,7 +326,7 @@ Runtime-tunable knobs, adjusted with `UP`/`DOWN` (select) and `LEFT`/`RIGHT`
 | Gaze scale | 0–2 | Eye-gaze strength multiplier on the model's lookAt range maps |
 | Springbones | on/off | Hair/clothes physics |
 | Spring stiffness / gravity | 0–2 | Springbone parameter multipliers |
-| Background | 4 modes | White / black / green (chroma key) / transparent |
+| Background | 4 modes | White / black / green (chroma key) / transparent (default; checkerboard on screen, real alpha in `P` screenshots) |
 
 ## Avatar feature support
 

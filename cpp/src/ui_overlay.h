@@ -36,7 +36,8 @@ struct SettingsState {
     float springStiffness = 1.0f;
     float springGravity = 1.0f;
     // Background: 0=white 1=black 2=green (chroma key) 3=transparent
-    int bgMode = 0;
+    // (default: transparent for OBS/window compositing and alpha PNGs)
+    int bgMode = 3;
 
     static constexpr int ROW_COUNT = 13;
     int selected = 0;

@@ -99,7 +99,7 @@ int main(int argc, char** argv) {
             "                   Use 0 for unlimited\n"
             "  --bg <mode>      Background: white, black, green (chroma key\n"
             "                   for OBS), or transparent (alpha screenshots;\n"
-            "                   P saves PNG with alpha). Default: white.\n"
+            "                   P saves PNG with alpha). Default: transparent.\n"
             "                   Also changeable at runtime in [S] Settings\n"
             "  --no-pip         Start without the webcam picture-in-picture\n"
             "                   overlay (W toggles it at runtime)\n"
@@ -132,7 +132,7 @@ int main(int argc, char** argv) {
     int initialCamIndex = 0;
     bool noPip = false;  // start without the webcam picture-in-picture overlay
     bool disableSpring = false;  // start with springbones off (--no-spring)
-    int bgMode = 0;      // 0=white 1=black 2=green 3=transparent (settings enum)
+    int bgMode = 3;      // 0=white 1=black 2=green 3=transparent (settings enum)
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
