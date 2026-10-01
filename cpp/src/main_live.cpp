@@ -587,6 +587,7 @@ int main(int argc, char** argv) {
             rigSolver.setHeadGains(st.headYawGain, st.headPitchGain, st.headRollGain);
             rigSolver.setHeadClamps(st.headMaxYaw, st.headMaxPitch, st.headMaxRoll);
             rigSolver.setHeadSmoothing(st.headSmoothing);
+            rigSolver.setBodySmoothing(st.bodySmoothing);
             rigSolver.setGazeScale(st.gazeScale);
             switch (st.bgMode) {
                 case 1: ssfb.setClearColor(0, 0, 0, 255); break;      // black

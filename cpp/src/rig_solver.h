@@ -58,6 +58,9 @@ public:
     // s in [0,1]: 0 responsive, 1 very smooth. Retunes the head filters
     // (OneEuro cutoff/beta + critically-damped glide time).
     void setHeadSmoothing(float s);
+    // s in [0,1]: same for the body pose path (arm rotations, spine,
+    // lean/twist, body extent).
+    void setBodySmoothing(float s);
 
 private:
     struct MorphBind { int meshIdx; int targetIdx; float weight; };
@@ -89,6 +92,9 @@ private:
     float neutralYaw_ = 0, neutralPitch_ = 0, neutralRoll_ = 0;
     int calibFrames_ = 0;
     static constexpr int CALIB_COUNT = 30;
+    // Seconds of continuous tracking loss before the tracked pose is
+    // relaxed toward neutral; shorter dropouts are bridged (pose held).
+    static constexpr float kLossGrace = 0.35f;
     bool calibrated_ = false;
     bool calibratingNow_ = false;   // active accumulation window
 
@@ -145,6 +151,13 @@ private:
     // Head smoothing 0..1: 0 = responsive (jerky tracking noise passes),
     // 1 = very smooth (more lag). Retunes the filters below.
     float headSmoothing_ = 0.5f;
+    // Body smoothing 0..1: same idea for the pose path (arms, spine, lean).
+    float bodySmoothing_ = 0.5f;
+    // Consecutive-tracking-loss time before the pose is relaxed toward
+    // neutral. Detection dropouts shorter than this are bridged silently
+    // (hold last pose) instead of snapping the body toward rest and back.
+    float faceLostFor_ = 0.0f;
+    float poseLostFor_ = 0.0f;
 
     // Eye gaze (bone-type lookAt): computed from the eyeLook* blendshapes
     // scaled by the model's lookAt range maps (matching Python solver).

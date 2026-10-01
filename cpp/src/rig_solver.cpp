@@ -52,12 +52,13 @@ RigSolver::RigSolver(const VRMModel& model) {
     // beta for responsive large movements.
     for (int i = 0; i < 8; i++)
         for (int j = 0; j < 3; j++) {
-            poseRotFilters_[i][j] = OneEuroFilter(0.8f, 0.05f);
-            smoothRot_[i][j] = SmoothFloat(0.1f);
+            poseRotFilters_[i][j] = OneEuroFilter(0.8f, 0.03f);
+            smoothRot_[i][j] = SmoothFloat(0.14f);
         }
 
     // Apply the default head-smoothing tuning to the head filters
     setHeadSmoothing(headSmoothing_);
+    setBodySmoothing(bodySmoothing_);
 
     // Blinks (ARKit indices 9=eyeBlinkLeft, 10=eyeBlinkRight) are very fast
     // events (100-300ms). The default 1 Hz filter only reaches ~17% per frame
@@ -143,22 +144,31 @@ void RigSolver::calibrate(const FaceResult& face) {
 }
 
 void RigSolver::update(const FaceResult& face, float dt) {
-    if (!calibrated_ || !face.detected) {
-        float decay = std::exp(-dt / 0.2f);
-        for (auto& w : morphWeights_) w *= decay;
-        headRot_ = glm::slerp(headRot_, glm::quat(1, 0, 0, 0), 1.0f - decay);
-        // Decay gaze angles to neutral along with expressions (matching
-        // Python _handle_loss).
-        eyeYawDeg_ *= decay;
-        eyePitchDeg_ *= decay;
-        yawFilter_.reset();
-        pitchFilter_.reset();
-        rollFilter_.reset();
-        smoothYaw_.reset();
-        smoothPitch_.reset();
-        smoothRoll_.reset();
+    if (!calibrated_) return;
+    if (!face.detected) {
+        // Bridge short detection dropouts silently: hold the last pose for
+        // up to kLossGrace seconds instead of decaying toward neutral and
+        // re-initializing the filters on the next detected frame (which
+        // showed up as sudden head/expression twitching at <100% detect).
+        faceLostFor_ += dt;
+        if (faceLostFor_ > kLossGrace) {
+            float decay = std::exp(-dt / 0.2f);
+            for (auto& w : morphWeights_) w *= decay;
+            headRot_ = glm::slerp(headRot_, glm::quat(1, 0, 0, 0), 1.0f - decay);
+            // Decay gaze angles to neutral along with expressions (matching
+            // Python _handle_loss).
+            eyeYawDeg_ *= decay;
+            eyePitchDeg_ *= decay;
+            yawFilter_.reset();
+            pitchFilter_.reset();
+            rollFilter_.reset();
+            smoothYaw_.reset();
+            smoothPitch_.reset();
+            smoothRoll_.reset();
+        }
         return;
     }
+    faceLostFor_ = 0.0f;
 
     float filteredBs[52];
     for (int i = 0; i < 52; i++) {
@@ -265,6 +275,28 @@ void RigSolver::setHeadSmoothing(float s) {
     smoothYaw_.setSmoothTime(glide);
     smoothPitch_.setSmoothTime(glide);
     smoothRoll_.setSmoothTime(glide);
+}
+
+void RigSolver::setBodySmoothing(float s) {
+    bodySmoothing_ = std::clamp(s, 0.0f, 1.0f);
+    float t = bodySmoothing_;
+    // Arm rotations: 0 → snappy (cutoff 1.2 Hz, beta 0.06, glide 80 ms)
+    //                 1 → very smooth (cutoff 0.4 Hz, beta 0, glide 200 ms)
+    float cutoff = 1.2f + (0.4f - 1.2f) * t;
+    float beta = 0.06f * (1.0f - t);
+    float glide = 0.08f + (0.20f - 0.08f) * t;
+    for (int i = 0; i < 8; i++)
+        for (int j = 0; j < 3; j++) {
+            poseRotFilters_[i][j].setParams(cutoff, beta);
+            smoothRot_[i][j].setSmoothTime(glide);
+        }
+    // Torso lean / spine twist / lateral
+    torsoFilter_.setParams(cutoff, 0.0f);
+    spineYFilter_.setParams(cutoff, 0.0f);
+    spineZFilter_.setParams(cutoff, 0.0f);
+    // Standing / body-extent scalar signals
+    bodyExtentFilter_.setParams(1.0f + (0.3f - 1.0f) * t, 0.0f);
+    standingFilter_.setParams(0.6f + (0.25f - 0.6f) * t, 0.0f);
 }
 
 std::string RigSolver::normalizeGroupName(std::string key) {
@@ -374,28 +406,47 @@ void RigSolver::calibratePose() {
 }
 
 void RigSolver::updatePose(const PoseResult& pose, float dt) {
-    if ((!calibrated_ && !calibratingNow_) || !pose.detected ||
+    if (!calibrated_ && !calibratingNow_) return;
+    if (!pose.detected ||
         pose.lmVis(PoseLandmarkIdx::L_SHOULDER) < 0.3f ||
         pose.lmVis(PoseLandmarkIdx::R_SHOULDER) < 0.3f) {
-        // Decay body pose toward neutral and reset filters
-        float decay = std::exp(-dt / 0.3f);
-        bodyPose_.lean *= decay;
-        bodyPose_.twist *= decay;
-        bodyPose_.lateral *= decay;
-        bodyPose_.standing *= decay;
-        bodyPose_.bodyExtent *= decay;
-        torsoFilter_.reset();
-        spineYFilter_.reset();
-        spineZFilter_.reset();
-        standingFilter_.reset();
-        bodyExtentFilter_.reset();
-        for (int i = 0; i < 8; i++)
-            for (int j = 0; j < 3; j++) {
-                poseRotFilters_[i][j].reset();
-                smoothRot_[i][j].reset();
-            }
+        // Bridge short dropouts (single flickered frames, brief shoulder
+        // visibility dips): hold the last pose for kLossGrace seconds.
+        // Relaxing earlier made the body snap toward rest and back on every
+        // dropout, since the filters reset and re-initialized to the raw
+        // input on the next detected frame.
+        poseLostFor_ += dt;
+        if (poseLostFor_ > kLossGrace) {
+            float decay = std::exp(-dt / 0.3f);
+            bodyPose_.lean *= decay;
+            bodyPose_.twist *= decay;
+            bodyPose_.lateral *= decay;
+            bodyPose_.standing *= decay;
+            bodyPose_.bodyExtent *= decay;
+            // Relax the arm rotations toward the bind pose as well (the
+            // spine terms already decay above).
+            bodyPose_.leftUpperArm = glm::slerp(
+                bodyPose_.leftUpperArm, glm::quat(1, 0, 0, 0), 1.0f - decay);
+            bodyPose_.rightUpperArm = glm::slerp(
+                bodyPose_.rightUpperArm, glm::quat(1, 0, 0, 0), 1.0f - decay);
+            bodyPose_.leftLowerArm = glm::slerp(
+                bodyPose_.leftLowerArm, glm::quat(1, 0, 0, 0), 1.0f - decay);
+            bodyPose_.rightLowerArm = glm::slerp(
+                bodyPose_.rightLowerArm, glm::quat(1, 0, 0, 0), 1.0f - decay);
+            torsoFilter_.reset();
+            spineYFilter_.reset();
+            spineZFilter_.reset();
+            standingFilter_.reset();
+            bodyExtentFilter_.reset();
+            for (int i = 0; i < 8; i++)
+                for (int j = 0; j < 3; j++) {
+                    poseRotFilters_[i][j].reset();
+                    smoothRot_[i][j].reset();
+                }
+        }
         return;
     }
+    poseLostFor_ = 0.0f;
 
     // Helper: world landmark → VRM direction (apply AXIS_FLIP)
     auto wl = [&](int idx) -> glm::vec3 {

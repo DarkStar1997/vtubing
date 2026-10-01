@@ -322,6 +322,7 @@ Runtime-tunable knobs, adjusted with `UP`/`DOWN` (select) and `LEFT`/`RIGHT`
 | Head yaw/pitch/roll gain | 0–1 | Tracking-to-bone rotation scale (default 0.55) |
 | Head max yaw/pitch/roll | 5–90° | Rotation clamps (defaults 35/20/15°) |
 | Head smoothing | 0–1 | 0 = snappy (tracking jitter passes through), 1 = very smooth with slightly more lag (default 0.5) |
+| Body smoothing | 0–1 | Same for arms/spine/lean from pose estimation; short detection dropouts are bridged automatically (default 0.5) |
 | Gaze scale | 0–2 | Eye-gaze strength multiplier on the model's lookAt range maps |
 | Springbones | on/off | Hair/clothes physics |
 | Spring stiffness / gravity | 0–2 | Springbone parameter multipliers |

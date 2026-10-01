@@ -5,6 +5,7 @@
 // passthrough, eye-gaze angle math, head gain/clamp knobs and detection
 // loss decay — the features ported from the Python pipeline.
 #include "rig_solver.h"
+#include "pose_tracker.h"
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -138,6 +139,52 @@ static void runFrames(RigSolver& solver, const FaceResult& face, int n,
                       float dt = 1.0f / 15.0f) {
     for (int i = 0; i < n; i++) solver.update(face, dt);
 }
+
+// Synthetic MediaPipe pose frame: symmetric standing figure whose arm
+// directions (raw MediaPipe world-space unit vectors, pre-AXIS_FLIP) are the
+// parameters. Hips sit 15 cm behind the shoulders so torso lean is nonzero.
+static PoseResult makePose(const glm::vec3& uaLraw, const glm::vec3& laLraw,
+                           const glm::vec3& uaRraw, const glm::vec3& laRraw) {
+    constexpr int LS = PoseLandmarkIdx::L_SHOULDER, RS = PoseLandmarkIdx::R_SHOULDER;
+    constexpr int LE = PoseLandmarkIdx::L_ELBOW, RE = PoseLandmarkIdx::R_ELBOW;
+    constexpr int LW = PoseLandmarkIdx::L_WRIST, RW = PoseLandmarkIdx::R_WRIST;
+    constexpr int LH = PoseLandmarkIdx::L_HIP, RH = PoseLandmarkIdx::R_HIP;
+    constexpr int LK = PoseLandmarkIdx::L_KNEE, RK = PoseLandmarkIdx::R_KNEE;
+    constexpr int LA = PoseLandmarkIdx::L_ANKLE, RA = PoseLandmarkIdx::R_ANKLE;
+    PoseResult p;
+    p.detected = true;
+    p.presence = 1.0f;
+    p.frameW = 640;
+    p.frameH = 480;
+    auto setWl = [&](int i, const glm::vec3& v) {
+        p.worldLandmarks[i * 3 + 0] = v.x;
+        p.worldLandmarks[i * 3 + 1] = v.y;
+        p.worldLandmarks[i * 3 + 2] = v.z;
+    };
+    auto setLm = [&](int i, float xN, float yN) {
+        p.landmarks[i * 5 + 0] = xN;
+        p.landmarks[i * 5 + 1] = yN;
+        p.landmarks[i * 5 + 2] = 0.0f;
+        p.landmarks[i * 5 + 3] = 1.0f;  // visibility
+        p.landmarks[i * 5 + 4] = 1.0f;  // presence
+    };
+    glm::vec3 ls(-0.18f, 0.45f, 0.0f), rs(0.18f, 0.45f, 0.0f);
+    glm::vec3 lh(-0.10f, 0.05f, -0.15f), rh(0.10f, 0.05f, -0.15f);
+    glm::vec3 le = ls + uaLraw * 0.25f, re = rs + uaRraw * 0.25f;
+    glm::vec3 lw = le + laLraw * 0.25f, rw = re + laRraw * 0.25f;
+    setWl(LS, ls); setWl(RS, rs);
+    setWl(LE, le);   setWl(RE, re);
+    setWl(LW, lw);   setWl(RW, rw);
+    setWl(LH, lh);     setWl(RH, rh);
+    setLm(LS, 0.42f, 0.30f); setLm(RS, 0.58f, 0.30f);
+    setLm(LE, 0.44f, 0.45f);    setLm(RE, 0.56f, 0.45f);
+    setLm(LW, 0.46f, 0.60f);    setLm(RW, 0.54f, 0.60f);
+    setLm(LH, 0.45f, 0.55f);      setLm(RH, 0.55f, 0.55f);
+    setLm(LK, 0.46f, 0.75f);     setLm(RK, 0.54f, 0.75f);
+    setLm(LA, 0.47f, 0.90f);    setLm(RA, 0.53f, 0.90f);
+    return p;
+}
+
 
 static void calibrate(RigSolver& solver) {
     solver.startCalibration();
@@ -367,6 +414,78 @@ int main() {
         CHECK(solver.eyeYawDeg() > 8.0f, "gaze set before loss");
         for (int i = 0; i < 30; i++) solver.update(lost, 1.0f / 15.0f);
         CHECK(std::abs(solver.eyeYawDeg()) < 0.1f, "gaze decays on detection loss");
+    }
+
+    // --- Body pose: smooth, flicker-resistant ----------------------------
+    {
+        TestAvatar av;
+        RigSolver solver(av.model);
+        calibrate(solver);
+
+        const float dt = 1.0f / 15.0f;
+        glm::vec3 down(0.0f, -1.0f, 0.0f);  // arms hanging down (raw = flipped)
+        PoseResult armsDown = makePose(down, down, down, down);
+
+        // Converge: arms 90° from rest, hips behind shoulders → lean
+        for (int i = 0; i < 60; i++) solver.updatePose(armsDown, dt);
+        const BodyPose bp0 = solver.bodyPose();
+        CHECK(bp0.valid, "body pose becomes valid");
+        float angleDown = glm::degrees(glm::angle(bp0.leftUpperArm));
+        CHECK(angleDown > 70.0f && angleDown < 110.0f,
+              "arms-down pose tracked (~90° from rest)");
+        CHECK(bp0.lean > 0.10f, "forward lean tracked from shoulder/hip depth");
+        printf("  arms %.1f°, lean %.3f\n", angleDown, bp0.lean);
+
+        // Brief detection dropout (< grace): pose must hold, no snap
+        PoseResult lost;  // detected = false
+        solver.updatePose(lost, dt);
+        solver.updatePose(lost, dt);  // ~0.13 s lost
+        const BodyPose bp1 = solver.bodyPose();
+        CHECK(std::abs(glm::degrees(glm::angle(bp1.leftUpperArm)) - angleDown)
+                  < 2.0f,
+              "brief dropout holds arm pose (grace period)");
+        CHECK(std::abs(bp1.lean - bp0.lean) < 0.005f,
+              "brief dropout holds torso lean");
+
+        // Recovery from the flicker: continuous with the pre-dropout pose
+        solver.updatePose(armsDown, dt);
+        float angleRec = glm::degrees(glm::angle(solver.bodyPose().leftUpperArm));
+        CHECK(std::abs(angleRec - angleDown) < 3.0f,
+              "recovery after dropout is continuous (no snap)");
+
+        // Sustained loss (> grace): everything relaxes toward rest
+        for (int i = 0; i < 20; i++) solver.updatePose(lost, dt);  // 1.33 s
+        const BodyPose bp2 = solver.bodyPose();
+        CHECK(glm::degrees(glm::angle(bp2.leftUpperArm)) < angleDown * 0.3f,
+              "sustained loss relaxes arms toward rest");
+        CHECK(std::abs(bp2.lean) < 0.02f, "sustained loss relaxes lean");
+
+        // Body smoothing knob: alternating ±5° elbow-direction wobble must
+        // shrink as smoothing rises (pose-estimation jitter resistance).
+        auto jitterP2P = [&](float smoothing) {
+            RigSolver s2(av.model);
+            calibrate(s2);
+            s2.setBodySmoothing(smoothing);
+            float lo = 1e9f, hi = -1e9f;
+            for (int i = 0; i < 120; i++) {
+                float a = glm::radians(90.0f + ((i % 2 == 0) ? 5.0f : -5.0f));
+                glm::vec3 d(std::cos(a), std::sin(a), 0.0f);
+                s2.updatePose(makePose(d, d, d, d), dt);
+                float e = glm::degrees(glm::angle(s2.bodyPose().leftUpperArm));
+                if (i >= 60) {  // skip convergence
+                    lo = std::min(lo, e);
+                    hi = std::max(hi, e);
+                }
+            }
+            return hi - lo;
+        };
+        float p2pSnappy = jitterP2P(0.0f);
+        float p2pSmooth = jitterP2P(1.0f);
+        printf("  pose jitter peak-to-peak: smoothing 0 → %.2f deg, "
+               "smoothing 1 → %.2f deg\n", p2pSnappy, p2pSmooth);
+        CHECK(p2pSmooth < p2pSnappy * 0.5f,
+              "setBodySmoothing suppresses pose jitter");
+        CHECK(p2pSmooth < 3.0f, "max smoothing nearly eliminates pose jitter");
     }
 
     printf("\n%s: %d failure(s)\n", g_failures ? "FAILURES" : "ALL OK", g_failures);

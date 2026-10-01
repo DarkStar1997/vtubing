@@ -27,6 +27,8 @@ struct SettingsState {
     float headMaxRoll = 15.0f;
     // 0 = responsive, 1 = very smooth (slightly more lag)
     float headSmoothing = 0.5f;
+    // Same for the body pose path (arms, spine, lean)
+    float bodySmoothing = 0.5f;
     // Eye gaze strength multiplier
     float gazeScale = 1.0f;
     // Springbones (hair/clothes physics)
@@ -36,7 +38,7 @@ struct SettingsState {
     // Background: 0=white 1=black 2=green (chroma key) 3=transparent
     int bgMode = 0;
 
-    static constexpr int ROW_COUNT = 12;
+    static constexpr int ROW_COUNT = 13;
     int selected = 0;
 
     static const char* bgModeName(int m) {
@@ -103,11 +105,12 @@ public:
             case 4: clampStep(s.headMaxPitch, 5.0f, 60.0f, 1.0f); break;
             case 5: clampStep(s.headMaxRoll, 5.0f, 45.0f, 1.0f); break;
             case 6: clampStep(s.headSmoothing, 0.0f, 1.0f, 0.05f); break;
-            case 7: clampStep(s.gazeScale, 0.0f, 2.0f, 0.1f); break;
-            case 8: s.springEnabled = !s.springEnabled; break;
-            case 9: clampStep(s.springStiffness, 0.0f, 2.0f, 0.1f); break;
-            case 10: clampStep(s.springGravity, 0.0f, 2.0f, 0.1f); break;
-            case 11: s.bgMode = (s.bgMode + (dir > 0 ? 1 : 3)) % 4; break;
+            case 7: clampStep(s.bodySmoothing, 0.0f, 1.0f, 0.05f); break;
+            case 8: clampStep(s.gazeScale, 0.0f, 2.0f, 0.1f); break;
+            case 9: s.springEnabled = !s.springEnabled; break;
+            case 10: clampStep(s.springStiffness, 0.0f, 2.0f, 0.1f); break;
+            case 11: clampStep(s.springGravity, 0.0f, 2.0f, 0.1f); break;
+            case 12: s.bgMode = (s.bgMode + (dir > 0 ? 1 : 3)) % 4; break;
         }
     }
 
@@ -380,6 +383,7 @@ public:
                 r.push_back({"Head max pitch (deg)", f2(st.headMaxPitch), (st.headMaxPitch - 5) / 55.0f});
                 r.push_back({"Head max roll (deg)", f2(st.headMaxRoll), (st.headMaxRoll - 5) / 40.0f});
                 r.push_back({"Head smoothing", f2(st.headSmoothing), st.headSmoothing});
+                r.push_back({"Body smoothing", f2(st.bodySmoothing), st.bodySmoothing});
                 r.push_back({"Gaze scale", f2(st.gazeScale), st.gazeScale / 2.0f});
                 r.push_back({"Springbones", std::string(st.springEnabled ? "ON" : "OFF"), -1.0f});
                 r.push_back({"Spring stiffness", f2(st.springStiffness), st.springStiffness / 2.0f});
