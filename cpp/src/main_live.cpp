@@ -940,6 +940,12 @@ int main(int argc, char** argv) {
 
         SDL_Surface* fbSurface = SDL_CreateSurfaceFrom(
             fbWidth, fbHeight, SDL_PIXELFORMAT_BGRA8888, bgraBuf.data(), fbWidth * 4);
+        // BLENDMODE_NONE: raw copy including alpha. SDL's default for
+        // alpha-carrying surfaces is BLEND, in which this frame's fully
+        // transparent pixels would not overwrite the window surface and
+        // every previously drawn avatar position would persist as a ghost
+        // ("stacking frames" regression in v0.4.2).
+        SDL_SetSurfaceBlendMode(fbSurface, SDL_BLENDMODE_NONE);
         SDL_BlitSurface(fbSurface, nullptr, winSurface, nullptr);
         SDL_UpdateWindowSurface(window);
         SDL_DestroySurface(fbSurface);
