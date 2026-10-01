@@ -8,6 +8,11 @@ name: release
 #   gh workflow run release.yml -f version=v0.4.0
 #   (optional: -f prerelease=true -f make_latest=false)
 #
+# Release notes: pass curated markdown via the multiline `notes` input
+# (falls back to GitHub's auto-generated notes when empty), e.g.
+#   gh workflow run release.yml -f version=v0.4.2 \
+#     -f notes="$(cat notes/v0.4.2.md)"
+#
 # Per platform:
 #   windows-x64   pack_release.ps1   (exe + DLLs + app-local MSVC CRT)
 #   macos-arm64   pack_release.sh    (binary + dylibs + .app bundle)
@@ -47,6 +52,11 @@ on:
         required: false
         default: true
         type: boolean
+      notes:
+        description: "Release notes (markdown, multiline). Empty = auto-generated."
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -357,11 +367,18 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+          NOTES: ${{ inputs.notes }}
         run: |
           set -euo pipefail
           ls -la dist/
           args=(--title "VTuber CPU $TAG (Windows x64, macOS arm64, Linux x86-64)"
-                --generate-notes --target "$GITHUB_SHA")
+                --target "$GITHUB_SHA")
+          if [ -n "$NOTES" ]; then
+            printf '%s' "$NOTES" > release_notes.md
+            args+=(--notes-file release_notes.md)
+          else
+            args+=(--generate-notes)
+          fi
           if [ "${{ inputs.prerelease }}" = "true" ]; then args+=(--prerelease); fi
           if [ "${{ inputs.make_latest }}" = "true" ]; then args+=(--latest); else args+=(--latest=false); fi
           # Upload only archives; never staging directories.
