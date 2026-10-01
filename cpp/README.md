@@ -264,7 +264,7 @@ cd cpp/build
 | `--cam <index>` | 0 | Initial webcam device index |
 | `--threads <N>` | 2 | Renderer worker threads, minimum 2 (`0` = automatic, up to 16) |
 | `--fps <N>` | 15 | Frame-rate cap in fps (`0` = unlimited) |
-| `--bg <mode>` | transparent | Background: `white`, `black`, `green` (chroma key for OBS), or `transparent` (alpha screenshots; shown as a checkerboard, `P` saves PNGs with real alpha). Also changeable at runtime in the settings panel. |
+| `--bg <mode>` | transparent | Background: `white`, `black`, `green` (chroma key for OBS), or `transparent` (real per-pixel window alpha with a compositor — OBS window capture composites it over the scene; checkerboard fallback otherwise; `P` saves PNGs with real alpha). Also changeable at runtime in the settings panel. |
 | `--no-pip` | off | Start without the webcam picture-in-picture overlay (W toggles it) |
 | `--no-spring` | off | Start with springbones disabled (hair/clothes physics; toggle at runtime in [S] Settings) |
 | `-v`, `--verbose` | off | Print diagnostics to the terminal (default: quiet; fps and calibration status are shown on the window) |
@@ -333,7 +333,16 @@ Runtime-tunable knobs, adjusted with `UP`/`DOWN` (select) and `LEFT`/`RIGHT`
 | Gaze scale | 0–2 | Eye-gaze strength multiplier on the model's lookAt range maps |
 | Springbones | on/off | Hair/clothes physics |
 | Spring stiffness / gravity | 0–2 | Springbone parameter multipliers |
-| Background | 4 modes | White / black / green (chroma key) / transparent (default; checkerboard on screen, real alpha in `P` screenshots) |
+| Background | 4 modes | White / black / green (chroma key) / transparent (default; real window alpha, composites in OBS window capture, checkerboard only without a compositor) |
+
+## Using with OBS
+
+- **Best result (Linux/X11, Windows):** keep the background on *transparent*
+  and add the app window via **Window Capture** — the per-pixel alpha is
+  preserved and the avatar composites directly over your game. Hide the UI
+  overlay (`W`) for a clean capture.
+- **If your setup drops the alpha** (e.g. some Wayland session recorders):
+  switch the background to *green* and add a *Chroma Key* filter in OBS.
 
 ## Avatar feature support
 

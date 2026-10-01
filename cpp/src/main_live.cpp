@@ -303,8 +303,21 @@ int main(int argc, char** argv) {
         ELOG("SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
-    SDL_Window* window = SDL_CreateWindow("VTuber Live", fbWidth, fbHeight, 0);
+    // SDL window. SDL_WINDOW_TRANSPARENT is best-effort: with a compositor
+    // (X11/Wayland/DWM) the window gets a per-pixel alpha channel, which
+    // OBS window capture composites correctly; without one the flag is
+    // cleared and the transparent background falls back to a checkerboard.
+    SDL_Window* window = SDL_CreateWindow("VTuber Live", fbWidth, fbHeight,
+                                          SDL_WINDOW_TRANSPARENT);
+    bool windowHasAlpha = window &&
+        (SDL_GetWindowFlags(window) & SDL_WINDOW_TRANSPARENT) != 0;
     SDL_Surface* winSurface = SDL_GetWindowSurface(window);
+    VLOG("[live] window %s\n",
+         windowHasAlpha
+             ? "has per-pixel alpha (transparent bg composites in OBS "
+               "window capture)"
+             : "is opaque (no compositor): transparent bg shows as "
+               "checkerboard");
 
     bool showPiP = !noPip, calibrating = false;
     bool framingApplied = false;
@@ -851,11 +864,20 @@ int main(int argc, char** argv) {
         // On little-endian, SDL_PIXELFORMAT_BGRA8888 reads bytes as [A,R,G,B]
         Framebuffer& out = (ss > 1) ? fb : ssfb;
         bool transparentBg = (uiOverlay.settings.bgMode == 3);
+        bool alphaWindow = transparentBg && windowHasAlpha;
         for (int i = 0; i < fbWidth * fbHeight; i++) {
             int x = i % fbWidth, y = i / fbWidth;
             uint8_t a = out.color[i*4+3];
-            if (transparentBg && a < 255) {
-                // Show transparency as a checkerboard (image-editor style).
+            if (alphaWindow) {
+                // Real per-pixel alpha straight to the window: OBS window
+                // capture composites it over the scene.
+                bgraBuf[i*4+0] = a;                 // A
+                bgraBuf[i*4+1] = out.color[i*4+0];  // R
+                bgraBuf[i*4+2] = out.color[i*4+1];  // G
+                bgraBuf[i*4+3] = out.color[i*4+2];  // B
+            } else if (transparentBg && a < 255) {
+                // No alpha-capable window (no compositor / dummy driver):
+                // show transparency as a checkerboard (image-editor style).
                 // P screenshots keep the real alpha channel.
                 uint8_t cb = ((x >> 3) ^ (y >> 3) & 1) ? 200 : 235;
                 float af = a / 255.0f, ia = 1.0f - af;
@@ -894,6 +916,27 @@ int main(int argc, char** argv) {
         hud.calibProgress = calibFaceFrames;
         hud.calibTarget = 30;
         uiOverlay.render(bgraBuf.data(), fbWidth, fbHeight, availableCameras, webcam.getActiveCameraId(), webcam.getCurrentCameraName(), hud);
+
+        // Alpha-window fixups (after the overlay has drawn into the buffer):
+        // - transparent bg: premultiply RGB by A (compositors expect it;
+        //   avoids halos around the avatar's edges)
+        // - opaque bgs: force A=255 — the overlay's translucent UI boxes
+        //   write fractional alpha, which would leak the desktop through
+        //   an alpha-capable window
+        if (windowHasAlpha) {
+            if (uiOverlay.settings.bgMode == 3) {
+                for (int i = 0; i < fbWidth * fbHeight; i++) {
+                    float af = bgraBuf[i*4+0] * (1.0f / 255.0f);
+                    if (af >= 1.0f) continue;
+                    bgraBuf[i*4+1] = (uint8_t)(bgraBuf[i*4+1] * af);
+                    bgraBuf[i*4+2] = (uint8_t)(bgraBuf[i*4+2] * af);
+                    bgraBuf[i*4+3] = (uint8_t)(bgraBuf[i*4+3] * af);
+                }
+            } else {
+                for (int i = 0; i < fbWidth * fbHeight; i++)
+                    bgraBuf[i*4+0] = 255;
+            }
+        }
 
         SDL_Surface* fbSurface = SDL_CreateSurfaceFrom(
             fbWidth, fbHeight, SDL_PIXELFORMAT_BGRA8888, bgraBuf.data(), fbWidth * 4);

@@ -286,9 +286,9 @@ public:
                             "2 = stiff snap-back.";
             case 15: return "Downward sag of hair/clothes. 0 = weightless, "
                             "2 = heavy droop.";
-            case 16: return "Transparent = alpha PNG screenshots (checkerboard "
-                            "on screen), green = chroma key for OBS, white/black "
-                            "= solid fill.";
+            case 16: return "Transparent = real window alpha, composites over "
+                            "games in OBS window capture; green = chroma key "
+                            "fallback. Checkerboard only without a compositor.";
         }
         return "";
     }
