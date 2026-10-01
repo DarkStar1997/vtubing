@@ -14,9 +14,11 @@ name: release
 #   linux-x86_64  pack_release_linux.sh (binary + libs, $ORIGIN rpath)
 #
 # Bundles include the MediaPipe tracking models and VRM avatars. Each
-# platform smoke-tests its build (renderer benchmark everywhere; plus a
-# headless vtuber_live run on Linux/macOS) before packing, and the pack
-# scripts verify the staged bundle is self-contained.
+# platform runs the CTest regression suite (rig solver, springbones,
+# expression-driven render pixel diffs, VRM 1.0 loader) and smoke-tests
+# its build (renderer benchmark everywhere; plus a headless vtuber_live
+# run on Linux/macOS) before packing, and the pack scripts verify the
+# staged bundle is self-contained.
 #
 # Windows binaries are not Authenticode-signed here (certificate secrets
 # are not wired into CI); sign locally with pack_release.ps1 -SignPfx if
@@ -131,6 +133,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           & cmake --build cpp/build -j
           if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      # ---------- Regression tests ----------
+      # Full CTest suite: calibration, expression mapping/gaze/head knobs
+      # (test_rig), springbone physics, expression-driven render pixel diffs
+      # (test_render; uses the avatar downloaded above), and VRM 1.0 loader
+      # parsing against the committed fixture. test_tracker is not wired
+      # into CTest (it needs a static image argument).
+      - name: Run regression tests (CTest)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd cpp/build
+          ctest --output-on-failure
 
       # ---------- Smoke tests ----------
 
