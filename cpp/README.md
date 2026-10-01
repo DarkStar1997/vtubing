@@ -121,8 +121,11 @@ notices), run from `cpp/` (`patchelf` is required):
 ./pack_release_linux.sh -v 0.4.0
 ```
 
-The tarball lands in `dist/` and runs on any x86-64 Linux with AVX2 and a
-glibc as new as the build machine's (CI builds on Ubuntu 24.04 → glibc 2.39).
+The tarball lands in `dist/` and runs on any x86-64 Linux with AVX2 and
+glibc ≥ 2.28 (2018+). CI builds it inside the `manylinux_2_28` container
+with `-static-libstdc++ -static-libgcc`, and `pack_release_linux.sh`
+verifies that baseline (set `LINUX_PORTABILITY_STRICT=1` to make a
+violation fatal; CI does).
 
 The app is silent by default: the MediaPipe library's glog diagnostics
 (INFO/WARNING lines) go to stderr and ignore `GLOG_minloglevel`, so in

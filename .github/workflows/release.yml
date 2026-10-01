@@ -13,6 +13,12 @@ name: release
 #   macos-arm64   pack_release.sh    (binary + dylibs + .app bundle)
 #   linux-x86_64  pack_release_linux.sh (binary + libs, $ORIGIN rpath)
 #
+# The Linux build runs in the manylinux_2_28 container (AlmaLinux 8 base,
+# glibc 2.28) and statically links libstdc++/libgcc, so the bundle runs on
+# every supported x86-64 distro: Ubuntu 20.04+, Debian 11+, RHEL/Rocky/
+# Alma 8 & 9, Amazon Linux 2023, openSUSE Leap 15.x+, Fedora, Arch.
+# pack_release_linux.sh enforces that baseline (LINUX_PORTABILITY_STRICT=1).
+#
 # Bundles include the MediaPipe tracking models and VRM avatars. Each
 # platform runs the CTest regression suite (rig solver, springbones,
 # expression-driven render pixel diffs, VRM 1.0 loader) and smoke-tests
@@ -50,6 +56,126 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Linux: built in the manylinux_2_28 container for a glibc 2.28 baseline
+  # (see the header comment). Static libstdc++/libgcc removes the GLIBCXX
+  # runtime requirement entirely.
+  build-linux:
+    name: build linux-x86_64
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - name: Normalize version
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "TAG=v${VERSION#v}" >> "$GITHUB_ENV"
+          echo "PLAIN=${VERSION#v}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Python dependencies (mediapipe wheel provides the MediaPipe C library)
+        shell: bash
+        run: uv sync --frozen
+
+      - name: Download tracking models + VRM avatars
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p assets/models
+          curl -fsSL -o assets/models/face_landmarker.task \
+            "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+          curl -fsSL -o assets/models/hand_landmarker.task \
+            "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+          curl -fsSL -o assets/models/pose_landmarker_full.task \
+            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task"
+          uv run python download_models.py
+          ls -la assets/models assets/avatars
+
+      # SDL3 build deps from the AlmaLinux 8 repos (X11, Wayland, audio).
+      # EGL/GLES headers are intentionally optional: the renderer is pure
+      # software; missing optional deps just disable those SDL backends.
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          dnf install -y --setopt=install_weak_deps=False \
+            cmake ninja-build patchelf pkg-config \
+            libX11-devel libXext-devel libXrandr-devel libXcursor-devel \
+            libXfixes-devel libXi-devel libXScrnSaver-devel libXrender-devel \
+            libXtst-devel libxkbcommon-devel \
+            wayland-devel wayland-protocols-devel \
+            mesa-libEGL-devel mesa-libGLES-devel \
+            dbus-devel systemd-devel \
+            pulseaudio-libs-devel alsa-lib-devel
+          cmake --version
+          c++ --version
+
+      - name: Configure + build (static C++ runtime for distro independence)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S cpp -B cpp/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+          cmake --build cpp/build -j
+
+      # ---------- Regression tests ----------
+      - name: Run regression tests (CTest)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd cpp/build
+          ctest --output-on-failure
+
+      # ---------- Smoke tests ----------
+      - name: Smoke test renderer benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd cpp/build
+          ./vtuber_cpu --bench 2 --ss 1
+
+      - name: Smoke test live pipeline headless
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd cpp/build
+          SDL_VIDEODRIVER=dummy ./vtuber_live --verbose --no-pip --fps 15 2> smoke.log &
+          pid=$!
+          sleep 20
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "::error::vtuber_live exited early"
+            wait "$pid" || true
+            tail -20 smoke.log || true
+            exit 1
+          fi
+          kill "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          tail -5 smoke.log
+          grep -q "fps," smoke.log || { echo "::error::no fps output from vtuber_live"; exit 1; }
+
+      # ---------- Package ----------
+      - name: Pack bundle
+        shell: bash
+        # STRICT: fail if the bundle would not run on glibc 2.28 systems.
+        run: LINUX_PORTABILITY_STRICT=1 cpp/pack_release_linux.sh -v "$PLAIN"
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: bundle-linux-x86_64
+          # Only the packed archive — the pack script also leaves its
+          # staging directory under dist/, which must not enter the
+          # artifact.
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
   build:
     name: build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -58,9 +184,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: linux-x86_64
-            os: ubuntu-24.04
-            ext: tar.gz
           - name: windows-x64
             os: windows-latest
             ext: zip
@@ -101,17 +224,6 @@ jobs:
 
       # SDL3 needs no manual setup: CMake FetchContent-builds the pinned
       # release-3.4.16 when no system package is found (the default on CI).
-      - name: Install build dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential patchelf pkg-config \
-            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev \
-            libxi-dev libxss-dev libxtst-dev libxrender-dev \
-            libxkbcommon-dev libwayland-dev wayland-protocols \
-            libegl1-mesa-dev libgl1-mesa-dev libdbus-1-dev libudev-dev \
-            libpulse-dev libasound2-dev libpipewire-0.3-dev
 
       - name: Set up MSVC environment (Windows)
         if: runner.os == 'Windows'
@@ -158,8 +270,8 @@ jobs:
           if [ -f vtuber_cpu.exe ]; then BIN=vtuber_cpu.exe; fi
           "./$BIN" --bench 2 --ss 1
 
-      - name: Smoke test live pipeline headless (Linux, macOS)
-        if: runner.os != 'Windows'
+      - name: Smoke test live pipeline headless (macOS)
+        if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
@@ -181,11 +293,6 @@ jobs:
           grep -q "fps," smoke.log || { echo "::error::no fps output from vtuber_live"; exit 1; }
 
       # ---------- Package ----------
-
-      - name: Pack bundle (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: cpp/pack_release_linux.sh -v "$PLAIN"
 
       - name: Pack bundle (macOS)
         if: runner.os == 'macOS'
@@ -213,7 +320,7 @@ jobs:
 
   release:
     name: publish release
-    needs: build
+    needs: [build, build-linux]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

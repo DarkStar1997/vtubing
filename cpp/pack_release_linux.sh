@@ -107,8 +107,10 @@ mapped onto a VRM avatar rendered by a built-in software rasterizer.
 ## Requirements
 
 - x86-64 CPU with AVX2 (Intel Haswell 2013+ / AMD Ryzen, or newer)
-- 64-bit Linux with glibc 2.39+ (built on Ubuntu 24.04; Debian 13, Fedora 40,
-  Arch and similar current distros work)
+- 64-bit Linux with glibc 2.28+ (2018 or newer: Ubuntu 20.04+, Debian 11+,
+  RHEL/Rocky/Alma 8 & 9, Amazon Linux 2023, Fedora, openSUSE Leap 15.x,
+  Arch and similar). The C++ runtime is statically linked, so no separate
+  libstdc++ requirement exists.
 - A desktop session (X11 or Wayland) and a webcam
 
 No installer, nothing to install - everything needed is inside this tarball.
@@ -161,8 +163,9 @@ Four VRM models are bundled. Any \`.vrm\` file works (VRM 0.x and 1.0):
 
 - **"Illegal instruction" on startup**: the CPU lacks AVX2. There is no
   fallback path for pre-2013 CPUs.
-- **"version \`GLIBC_2.xx' not found"**: the distro's glibc is older than the
-  build's. Use a newer distro (or build from source - see the project repo).
+- **"version \`GLIBC_2.xx' not found"**: the distro's glibc is older than
+  2.28 (2018). Use a newer distro (or build from source - see the project
+  repo).
 - **Avatar does not move**: make sure the webcam works and you are in frame,
   then press SPACE to calibrate. Toggle the PiP overlay with W to see what
   the tracker sees.
@@ -218,6 +221,42 @@ if [ "$RPATHS" != '$ORIGIN' ]; then
     echo "ERROR: staged executable is not self-contained (unexpected rpaths: $RPATHS)" >&2
     exit 1
 fi
+
+# --- Portability check: the bundle must run on glibc 2.28 systems --------------
+# The release is built in the manylinux_2_28 container with a statically
+# linked C++ runtime. Verify that held: max referenced GLIBC symbol version
+# <= 2.28 and no GLIBCXX_* symbols at all. Warn by default; fail hard when
+# LINUX_PORTABILITY_STRICT=1 (the CI release workflow sets it).
+check_portability() {
+    local bad=0
+    local max_glibc glibcxx
+    for f in "$STAGE/vtuber_live" "$STAGE/libSDL3.so.0" "$STAGE/libmediapipe.so"; do
+        max_glibc="$(readelf --version-info "$f" 2>/dev/null \
+            | grep -o 'GLIBC_2\.[0-9]*' | sort -Vu | tail -1 || true)"
+        glibcxx="$(readelf --version-info "$f" 2>/dev/null \
+            | grep -c 'GLIBCXX_' || true)"
+        echo "  $(basename "$f"): max ${max_glibc:-GLIBC_(none)}, GLIBCXX refs: $glibcxx"
+        if [ -n "$max_glibc" ]; then
+            minor="${max_glibc#GLIBC_2.}"
+            if [ "$minor" -gt 28 ]; then
+                echo "    -> exceeds the glibc 2.28 baseline" >&2
+                bad=1
+            fi
+        fi
+        if [ "$f" = "$STAGE/vtuber_live" ] && [ "$glibcxx" -ne 0 ]; then
+            echo "    -> libstdc++ not statically linked (GLIBCXX symbols present)" >&2
+            bad=1
+        fi
+    done
+    if [ "$bad" -ne 0 ]; then
+        if [ "${LINUX_PORTABILITY_STRICT:-0}" = "1" ]; then
+            echo "ERROR: bundle violates the glibc 2.28 / static-libstdc++ baseline" >&2
+            exit 1
+        fi
+        echo "WARNING: bundle does not meet the manylinux_2_28 baseline (see above)" >&2
+    fi
+}
+check_portability
 # Every dependency must resolve; run from the stage with a pristine loader
 # environment (no LD_LIBRARY_PATH rescue), then confirm via LD_DEBUG that the
 # *staged* copies are the ones actually loaded - not system fallbacks.
