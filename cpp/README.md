@@ -326,6 +326,10 @@ Runtime-tunable knobs, adjusted with `UP`/`DOWN` (select) and `LEFT`/`RIGHT`
 | Head max yaw/pitch/roll | 5–90° | Rotation clamps (defaults 35/20/15°) |
 | Head smoothing | 0–1 | 0 = snappy (tracking jitter passes through), 1 = very smooth with slightly more lag (default 0.5) |
 | Body smoothing | 0–1 | Same for arms/spine/lean from pose estimation; short detection dropouts are bridged automatically (default 0.5) |
+| Idle motion | on/off | Procedural idle life: auto-blink, breathing, eye micro-saccades, weight shift (default on) |
+| Blink rate | 0–30/min | Procedural blinks when you don't blink; your real blinks always take over (default 15) |
+| Idle intensity | 0–1 | Breathing / saccade / sway strength (default 0.5) |
+| Head position | 0–1 | Head translation/parallax from your tracked head position — lean in and the avatar leans in (default 0.5, 0 = rotation only) |
 | Gaze scale | 0–2 | Eye-gaze strength multiplier on the model's lookAt range maps |
 | Springbones | on/off | Hair/clothes physics |
 | Spring stiffness / gravity | 0–2 | Springbone parameter multipliers |

@@ -29,6 +29,11 @@ struct SettingsState {
     float headSmoothing = 0.5f;
     // Same for the body pose path (arms, spine, lean)
     float bodySmoothing = 0.5f;
+    // Procedural idle life: auto-blink, breathing, micro-saccades, sway
+    bool idleEnabled = true;
+    float blinkRate = 15.0f;    // procedural blinks/min when user doesn't blink
+    float idleIntensity = 0.5f; // breathing / saccade / sway amount
+    float headPosGain = 0.5f;   // head translation/parallax amount
     // Eye gaze strength multiplier
     float gazeScale = 1.0f;
     // Springbones (hair/clothes physics)
@@ -39,7 +44,7 @@ struct SettingsState {
     // (default: transparent for OBS/window compositing and alpha PNGs)
     int bgMode = 3;
 
-    static constexpr int ROW_COUNT = 13;
+    static constexpr int ROW_COUNT = 17;
     int selected = 0;
 
     static const char* bgModeName(int m) {
@@ -107,11 +112,15 @@ public:
             case 5: clampStep(s.headMaxRoll, 5.0f, 45.0f, 1.0f); break;
             case 6: clampStep(s.headSmoothing, 0.0f, 1.0f, 0.05f); break;
             case 7: clampStep(s.bodySmoothing, 0.0f, 1.0f, 0.05f); break;
-            case 8: clampStep(s.gazeScale, 0.0f, 2.0f, 0.1f); break;
-            case 9: s.springEnabled = !s.springEnabled; break;
-            case 10: clampStep(s.springStiffness, 0.0f, 2.0f, 0.1f); break;
-            case 11: clampStep(s.springGravity, 0.0f, 2.0f, 0.1f); break;
-            case 12: s.bgMode = (s.bgMode + (dir > 0 ? 1 : 3)) % 4; break;
+            case 8: s.idleEnabled = !s.idleEnabled; break;
+            case 9: clampStep(s.blinkRate, 0.0f, 30.0f, 1.0f); break;
+            case 10: clampStep(s.idleIntensity, 0.0f, 1.0f, 0.05f); break;
+            case 11: clampStep(s.headPosGain, 0.0f, 1.0f, 0.05f); break;
+            case 12: clampStep(s.gazeScale, 0.0f, 2.0f, 0.1f); break;
+            case 13: s.springEnabled = !s.springEnabled; break;
+            case 14: clampStep(s.springStiffness, 0.0f, 2.0f, 0.1f); break;
+            case 15: clampStep(s.springGravity, 0.0f, 2.0f, 0.1f); break;
+            case 16: s.bgMode = (s.bgMode + (dir > 0 ? 1 : 3)) % 4; break;
         }
     }
 
@@ -259,15 +268,25 @@ public:
             case 7:  return "Same for arms, spine and lean from pose estimation. "
                             "Brief detection dropouts (<0.35 s) are bridged "
                             "automatically.";
-            case 8:  return "Eye-gaze strength via the model's lookAt maps. "
+            case 8:  return "Procedural idle life: auto-blink, breathing, eye "
+                            "micro-saccades and slow weight shift, so the avatar "
+                            "stays alive even when you sit still.";
+            case 9:  return "Procedural blinks per minute when you don't blink "
+                            "yourself. Your real blinks always take over.";
+            case 10: return "Strength of breathing, saccades and weight shift. "
+                            "Blink strength is unaffected.";
+            case 11: return "Head translation/parallax: your head position in "
+                            "frame shifts the avatar's head slightly (lean in "
+                            "= comes closer). 0 = rotation only.";
+            case 12: return "Eye-gaze strength via the model's lookAt maps. "
                             "0 = stare ahead; above 1 = livelier eye darts.";
-            case 9:  return "Hair/clothes physics master switch. OFF = hair glued "
+            case 13: return "Hair/clothes physics master switch. OFF = hair glued "
                             "to the head, lowest CPU.";
-            case 10: return "How strongly strands spring back to rest. 0 = floppy, "
+            case 14: return "How strongly strands spring back to rest. 0 = floppy, "
                             "2 = stiff snap-back.";
-            case 11: return "Downward sag of hair/clothes. 0 = weightless, "
+            case 15: return "Downward sag of hair/clothes. 0 = weightless, "
                             "2 = heavy droop.";
-            case 12: return "Transparent = alpha PNG screenshots (checkerboard "
+            case 16: return "Transparent = alpha PNG screenshots (checkerboard "
                             "on screen), green = chroma key for OBS, white/black "
                             "= solid fill.";
         }
@@ -450,6 +469,10 @@ public:
                 r.push_back({"Head max roll (deg)", f2(st.headMaxRoll), (st.headMaxRoll - 5) / 40.0f});
                 r.push_back({"Head smoothing", f2(st.headSmoothing), st.headSmoothing});
                 r.push_back({"Body smoothing", f2(st.bodySmoothing), st.bodySmoothing});
+                r.push_back({"Idle motion", std::string(st.idleEnabled ? "ON" : "OFF"), -1.0f});
+                r.push_back({"Blink rate (/min)", f2(st.blinkRate), st.blinkRate / 30.0f});
+                r.push_back({"Idle intensity", f2(st.idleIntensity), st.idleIntensity});
+                r.push_back({"Head position", f2(st.headPosGain), st.headPosGain});
                 r.push_back({"Gaze scale", f2(st.gazeScale), st.gazeScale / 2.0f});
                 r.push_back({"Springbones", std::string(st.springEnabled ? "ON" : "OFF"), -1.0f});
                 r.push_back({"Spring stiffness", f2(st.springStiffness), st.springStiffness / 2.0f});

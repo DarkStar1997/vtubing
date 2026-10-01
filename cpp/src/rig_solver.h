@@ -62,6 +62,31 @@ public:
     // lean/twist, body extent).
     void setBodySmoothing(float s);
 
+    // --- Procedural idle life (auto-blink, breathing, saccades, sway) ---
+    // Runs on wall-clock time inside update(); costs a few blendshape
+    // weights and sines. Off by default in the solver (the live app turns
+    // it on via the settings GUI); deterministic via a fixed seed.
+    void setIdleEnabled(bool on) { idleEnabled_ = on; }
+    // 0..1: scales breathing amplitude, saccade magnitude and sway.
+    void setIdleIntensity(float s) { idleIntensity_ = std::clamp(s, 0.0f, 1.0f); }
+    // Procedural blinks per minute fired when the user doesn't blink.
+    void setBlinkRatePerMin(float r) { blinkRate_ = std::clamp(r, 0.0f, 60.0f); }
+    // 0..1: head translation/parallax amount from the tracked face position.
+    void setHeadPosGain(float g) { headPosGain_ = std::clamp(g, 0.0f, 1.0f); }
+    // Breathing phase, -1..1 (0.2 Hz sine scaled by idle intensity).
+    float breath() const { return breathVal_; }
+    // Slow weight-shift lateral phase, -1..1 (~0.09 Hz).
+    float sway() const { return swayVal_; }
+    // Head translation offset in model space (meters, calibrated + clamped).
+    glm::vec3 headPosition() const { return headPos_; }
+
+private:
+    // Idle helpers: xorshift RNG, exponential inter-blink interval, and the
+    // procedural blink weight envelope (0..1 over ~0.28 s).
+    float idleRand();
+    float idleExponential();
+    static float blinkEnvelope(float t);
+
 private:
     struct MorphBind { int meshIdx; int targetIdx; float weight; };
     // Key: lowercased group name (preset name, or group name if preset is empty/unknown)
@@ -153,6 +178,27 @@ private:
     float headSmoothing_ = 0.5f;
     // Body smoothing 0..1: same idea for the pose path (arms, spine, lean).
     float bodySmoothing_ = 0.5f;
+    // --- Procedural idle life state ---
+    bool idleEnabled_ = false;   // live app enables via settings (default on)
+    float idleIntensity_ = 0.5f;
+    float blinkRate_ = 15.0f;    // procedural blinks / minute
+    float headPosGain_ = 0.5f;
+    uint32_t rng_ = 0x9E3779B9u; // xorshift32, fixed seed => deterministic
+    float idleT_ = 0.0f;         // idle wall clock
+    float sinceUserBlink_ = 10.0f;
+    float nextBlinkIn_ = 2.5f;   // countdown to scheduled procedural blink
+    float blinkAnim_ = -1.0f;    // <0 idle, else seconds into the envelope
+    float saccYaw_ = 0.0f, saccPitch_ = 0.0f;        // current offset (deg)
+    float saccTargetYaw_ = 0.0f, saccTargetPitch_ = 0.0f;
+    float saccHold_ = 1.0f;      // time until the next saccade
+    float breathVal_ = 0.0f, swayVal_ = 0.0f;
+    // Head translation/parallax: neutral nose position + eye span captured
+    // at calibration (landmark 1 = nose tip, 33/263 = outer eye corners).
+    glm::vec2 neutralNose_{0.0f, 0.0f};
+    float neutralSpan_ = 0.001f;
+    glm::vec3 headPos_{0.0f};
+    OneEuroFilter posXFilter_{1.2f, 0.02f}, posYFilter_{1.2f, 0.02f},
+        posZFilter_{0.8f, 0.0f};
     // Consecutive-tracking-loss time before the pose is relaxed toward
     // neutral. Detection dropouts shorter than this are bridged silently
     // (hold last pose) instead of snapping the body toward rest and back.

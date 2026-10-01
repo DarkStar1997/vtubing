@@ -37,9 +37,12 @@ std::vector<glm::mat4> computeWorldMatrices(const VRMModel& model);
 
 // Compute world matrices applying local rotation deltas at specified nodes.
 // Each entry: nodeIndex → local rotation delta (post-multiplied onto bind rotation).
+// Optional translations: nodeIndex → local translation delta (added to the
+// bind translation), used for head position/parallax.
 std::vector<glm::mat4> computeWorldMatricesWithOverrides(
     const VRMModel& model,
-    const std::unordered_map<int, glm::quat>& overrides);
+    const std::unordered_map<int, glm::quat>& overrides,
+    const std::unordered_map<int, glm::vec3>* translations = nullptr);
 
 // Compute skinning joint matrices: worldMatrix[jointNode] * IBM[joint]
 std::vector<glm::mat4> computeJointMatrices(

@@ -103,6 +103,8 @@ void RigSolver::startCalibration() {
     calibFrames_ = 0;
     neutralBs_.fill(0.0f);
     neutralYaw_ = neutralPitch_ = neutralRoll_ = 0.0f;
+    neutralNose_ = {0.0f, 0.0f};
+    neutralSpan_ = 0.0f;
     poseCalibrated_ = false;
     handsCalibrated_ = false;
     handTwistNeutral_[0] = handTwistNeutral_[1] = 0.0f;
@@ -130,6 +132,15 @@ void RigSolver::calibrate(const FaceResult& face) {
         neutralYaw_ += face.yaw;
         neutralPitch_ += face.pitch;
         neutralRoll_ += face.roll;
+        // Head-position neutral (nose tip + eye span) for parallax
+        neutralNose_ += glm::vec2(face.landmarks[1 * 3 + 0],
+                                  face.landmarks[1 * 3 + 1]);
+        neutralSpan_ += std::max(
+            glm::length(glm::vec2(face.landmarks[263 * 3 + 0] -
+                                      face.landmarks[33 * 3 + 0],
+                                  face.landmarks[263 * 3 + 1] -
+                                      face.landmarks[33 * 3 + 1])),
+            1e-3f);
         calibFrames_++;
         if (calibFrames_ == CALIB_COUNT) {
             float inv = 1.0f / CALIB_COUNT;
@@ -138,12 +149,72 @@ void RigSolver::calibrate(const FaceResult& face) {
             neutralYaw_ *= inv;
             neutralPitch_ *= inv;
             neutralRoll_ *= inv;
+            neutralNose_ *= inv;
+            neutralSpan_ *= inv;
             calibrated_ = true;
         }
     }
 }
 
+// --- Idle helpers -------------------------------------------------------------
+
+float RigSolver::idleRand() {
+    // xorshift32: deterministic (fixed seed) so tests are reproducible.
+    uint32_t r = rng_;
+    r ^= r << 13;
+    r ^= r >> 17;
+    r ^= r << 5;
+    rng_ = r;
+    return (r >> 8) * (1.0f / 16777216.0f);  // [0,1)
+}
+
+float RigSolver::idleExponential() {
+    // Exponentially distributed interval: Poisson process with mean 60/rate
+    // seconds (rate in blinks/minute).
+    float mean = 60.0f / std::max(blinkRate_, 0.01f);
+    float u = idleRand();
+    if (u < 1e-6f) u = 1e-6f;
+    return -std::log(u) * mean;
+}
+
+float RigSolver::blinkEnvelope(float t) {
+    // Down 90 ms, hold 50 ms, up 140 ms; eased for a natural look.
+    if (t < 0.0f || t > 0.28f) return 0.0f;
+    if (t < 0.09f) {
+        float x = t / 0.09f;
+        return 1.0f - (1.0f - x) * (1.0f - x);  // ease-out close
+    }
+    if (t < 0.14f) return 1.0f;
+    float x = (t - 0.14f) / 0.14f;
+    return (1.0f - x) * (1.0f - x);             // ease-in open
+}
+
 void RigSolver::update(const FaceResult& face, float dt) {
+    // --- Procedural idle life: phases advance on wall-clock time, even
+    // when the face is momentarily lost (the avatar keeps breathing).
+    if (idleEnabled_) {
+        idleT_ += dt;
+        // Breathing: 0.2 Hz (= 12 breaths/min, resting rate)
+        breathVal_ = std::sin(6.2831853f * 0.20f * idleT_) * idleIntensity_;
+        // Weight shift: slow lateral sway, ~11 s period, phase-shifted
+        swayVal_ = std::sin(6.2831853f * 0.09f * idleT_ + 1.7f) * idleIntensity_;
+        // Micro-saccades: retarget a small gaze offset every 0.4-2.5 s
+        saccHold_ -= dt;
+        if (saccHold_ <= 0.0f) {
+            saccTargetYaw_ = (idleRand() * 2.0f - 1.0f) * 2.0f;   // ±2 deg
+            saccTargetPitch_ = (idleRand() * 2.0f - 1.0f) * 1.0f;  // ±1 deg
+            saccHold_ = 0.4f + idleRand() * 2.1f;
+        }
+        // Saccades are near-instant; settle within ~2 frames at 15 fps
+        float k = 1.0f - std::exp(-dt / 0.05f);
+        saccYaw_ += (saccTargetYaw_ - saccYaw_) * k;
+        saccPitch_ += (saccTargetPitch_ - saccPitch_) * k;
+    } else {
+        breathVal_ = 0.0f;
+        swayVal_ = 0.0f;
+        saccYaw_ = saccPitch_ = 0.0f;
+        saccTargetYaw_ = saccTargetPitch_ = 0.0f;
+    }
     if (!calibrated_) return;
     if (!face.detected) {
         // Bridge short detection dropouts silently: hold the last pose for
@@ -175,6 +246,35 @@ void RigSolver::update(const FaceResult& face, float dt) {
         float val = face.blendshapes[i] - neutralBs_[i];
         val = std::max(0.0f, std::min(1.0f, val));
         filteredBs[i] = bsFilters_[i].filter(val, dt);
+    }
+
+    // --- Procedural auto-blink: if the user doesn't blink, fire blinks on
+    // a Poisson schedule (~15/min default) so the avatar doesn't stare
+    // dead-eyed. A real user blink resets the schedule.
+    {
+        float userBlink = std::max(filteredBs[9], filteredBs[10]);
+        if (userBlink > 0.35f) {
+            sinceUserBlink_ = 0.0f;
+            // The user blinked for us: push the procedural schedule out
+            nextBlinkIn_ = idleExponential();
+        } else {
+            sinceUserBlink_ += dt;
+            nextBlinkIn_ -= dt;
+        }
+        if (blinkAnim_ < 0.0f && idleEnabled_ && blinkRate_ > 0.0f &&
+            nextBlinkIn_ <= 0.0f && sinceUserBlink_ > 0.75f) {
+            blinkAnim_ = 0.0f;
+            nextBlinkIn_ = idleExponential();  // schedule the next one
+        }
+        if (blinkAnim_ >= 0.0f) {
+            blinkAnim_ += dt;
+            float w = blinkEnvelope(blinkAnim_);
+            if (blinkAnim_ > 0.30f) blinkAnim_ = -1.0f;
+            if (w > 0.0f) {
+                filteredBs[9] = std::max(filteredBs[9], w);
+                filteredBs[10] = std::max(filteredBs[10], w);
+            }
+        }
     }
 
     std::fill(morphWeights_.begin(), morphWeights_.end(), 0.0f);
@@ -235,8 +335,37 @@ void RigSolver::update(const FaceResult& face, float dt) {
         // User gaze-strength multiplier applies to both axes
         yawDeg *= gazeScale_;
         pitchDeg *= gazeScale_;
+        // Micro-saccades ride on top of the tracked gaze
+        if (idleEnabled_) {
+            yawDeg += saccYaw_ * idleIntensity_;
+            pitchDeg += saccPitch_ * idleIntensity_;
+        }
         eyeYawDeg_ = gazeYawFilter_.filter(yawDeg, dt);
         eyePitchDeg_ = gazePitchFilter_.filter(pitchDeg, dt);
+    }
+
+    // --- Head translation / parallax: nose-tip position + eye-corner span
+    // from the face mesh (scale-invariant, no frame dimensions needed).
+    // Moving in frame slides the head slightly; leaning toward the camera
+    // (bigger face) brings it slightly forward. Clamped hard: VRM models
+    // are thin shells and large offsets would open the neck seam.
+    {
+        glm::vec2 nose(face.landmarks[1 * 3 + 0], face.landmarks[1 * 3 + 1]);
+        glm::vec2 eL(face.landmarks[33 * 3 + 0], face.landmarks[33 * 3 + 1]);
+        glm::vec2 eR(face.landmarks[263 * 3 + 0], face.landmarks[263 * 3 + 1]);
+        float span = std::max(glm::length(eR - eL), 1e-3f);
+        // Image x grows right, y grows down; model X/Y match screen
+        // orientation for a model facing the viewer.
+        float fx = (nose.x - neutralNose_.x) / span;
+        float fy = -(nose.y - neutralNose_.y) / span;
+        float fz = span / neutralSpan_ - 1.0f;
+        glm::vec3 target(fx * 0.06f, fy * 0.05f, fz * 0.12f);
+        target = glm::clamp(target, glm::vec3(-0.05f, -0.04f, -0.08f),
+                            glm::vec3(0.05f, 0.04f, 0.08f)) *
+                 headPosGain_;
+        headPos_ = glm::vec3(posXFilter_.filter(target.x, dt),
+                             posYFilter_.filter(target.y, dt),
+                             posZFilter_.filter(target.z, dt));
     }
 }
 

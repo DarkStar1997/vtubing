@@ -589,6 +589,10 @@ int main(int argc, char** argv) {
             rigSolver.setHeadSmoothing(st.headSmoothing);
             rigSolver.setBodySmoothing(st.bodySmoothing);
             rigSolver.setGazeScale(st.gazeScale);
+            rigSolver.setIdleEnabled(st.idleEnabled);
+            rigSolver.setIdleIntensity(st.idleIntensity);
+            rigSolver.setBlinkRatePerMin(st.blinkRate);
+            rigSolver.setHeadPosGain(st.headPosGain);
             switch (st.bgMode) {
                 case 1: ssfb.setClearColor(0, 0, 0, 255); break;      // black
                 case 2: ssfb.setClearColor(0, 255, 0, 255); break;    // green (chroma key)
@@ -688,12 +692,16 @@ int main(int argc, char** argv) {
                 setIf("rightUpperArm", bp.rightUpperArm);
                 setIf("leftLowerArm", bp.leftLowerArm);
                 setIf("rightLowerArm", bp.rightLowerArm);
-                // Spine: distribute lean/twist/lateral across upperChest, chest, spine
+                // Spine: distribute lean/twist/lateral across upperChest, chest, spine.
+                // Breathing (X) and weight-shift sway (Z) ride along on the
+                // same distribution so the idle motion moves the whole torso.
                 auto setEuler = [&](const std::string& bone, float s) {
                     auto it = model.boneNodes.find(bone);
                     if (it != model.boneNodes.end())
                         overrides[it->second] = glm::quat(
-                            glm::vec3(bp.lean * s, bp.twist * s, bp.lateral * s));
+                            glm::vec3(bp.lean * s + rigSolver.breath() * 0.022f * s,
+                                      bp.twist * s,
+                                      bp.lateral * s + rigSolver.sway() * 0.013f * s));
                 };
                 setEuler("upperChest", 0.5f);
                 setEuler("chest", 0.3f);
@@ -709,6 +717,17 @@ int main(int argc, char** argv) {
                 setRot("rightUpperArm", 0, -0.20f, -1.30f);
                 setRot("leftLowerArm", 0, 0, -1.15f);
                 setRot("rightLowerArm", 0, 0, 1.15f);
+                // Keep breathing even without a tracked body pose
+                auto breathEuler = [&](const std::string& bone, float s) {
+                    auto it = model.boneNodes.find(bone);
+                    if (it != model.boneNodes.end())
+                        overrides[it->second] = glm::quat(glm::vec3(
+                            rigSolver.breath() * 0.022f * s, 0.0f,
+                            rigSolver.sway() * 0.013f * s));
+                };
+                breathEuler("upperChest", 0.5f);
+                breathEuler("chest", 0.3f);
+                breathEuler("spine", 0.2f);
             }
             // Merge hand finger overrides
             for (const auto& [nodeIdx, rot] : rigSolver.handOverrides())
@@ -725,10 +744,31 @@ int main(int argc, char** argv) {
                 }
             }
 
+            // Head translation/parallax: distribute the offset over the
+            // head/neck chain (skinned vertices interpolate between them,
+            // so the neck seam stays closed).
+            std::unordered_map<int, glm::vec3> translations;
+            {
+                glm::vec3 hp = rigSolver.headPosition();
+                if (glm::length(hp) > 1e-6f) {
+                    int head = model.headNodeIndex;
+                    auto neckIt = model.boneNodes.find("neck");
+                    if (head >= 0 && neckIt != model.boneNodes.end() &&
+                        neckIt->second != head) {
+                        translations[neckIt->second] = hp * 0.5f;
+                        translations[head] = hp * 0.5f;
+                    } else if (head >= 0) {
+                        translations[head] = hp;
+                    }
+                }
+            }
+
             // Base world matrices: tracking overrides applied
             std::vector<glm::mat4> baseWorld =
-                overrides.empty() ? bindWorldMatrices
-                                  : computeWorldMatricesWithOverrides(model, overrides);
+                overrides.empty() && translations.empty()
+                    ? bindWorldMatrices
+                    : computeWorldMatricesWithOverrides(model, overrides,
+                                                        &translations);
 
             // Springbones (hair/clothes physics) run on top of the tracking
             // pose; their local deltas are merged into the override map.
@@ -745,9 +785,10 @@ int main(int argc, char** argv) {
                     overrides[nodeIdx] = rot;
             }
 
-            if (!overrides.empty()) {
+            if (!overrides.empty() || !translations.empty()) {
                 std::vector<glm::mat4> modWorld =
-                    computeWorldMatricesWithOverrides(model, overrides);
+                    computeWorldMatricesWithOverrides(model, overrides,
+                                                      &translations);
                 jointMatrices = computeJointMatrices(model, modWorld);
 
                 // Determine front arm from world Z of upper arm bones

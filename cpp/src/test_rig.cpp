@@ -488,6 +488,169 @@ int main() {
         CHECK(p2pSmooth < 3.0f, "max smoothing nearly eliminates pose jitter");
     }
 
+    // --- Procedural idle life + head parallax ----------------------------
+    {
+        TestAvatar av;
+        const float dt = 1.0f / 15.0f;
+        FaceResult neutral = makeFace({}, 0, 0, 0);
+
+        // Auto-blink fires on a Poisson schedule when the user doesn't blink
+        {
+            RigSolver s(av.model);
+            calibrate(s);
+            s.setIdleEnabled(true);
+            s.setBlinkRatePerMin(60.0f);  // mean interval 1 s
+            float maxBlink = 0.0f;
+            for (int i = 0; i < 90; i++) {  // 6 s
+                s.update(neutral, dt);
+                maxBlink = std::max(maxBlink, s.morphWeights()[av.morphOf["blink"]]);
+            }
+            CHECK(maxBlink > 0.5f, "procedural blink fires without user blink");
+            // ... and the envelope closes again
+            float endBlink = s.morphWeights()[av.morphOf["blink"]];
+            CHECK(endBlink < 0.35f, "procedural blink envelope closes");
+        }
+
+        // No procedural blink while the user is blinking (0.75 s guard)
+        {
+            RigSolver s(av.model);
+            calibrate(s);
+            s.setIdleEnabled(true);
+            s.setBlinkRatePerMin(60.0f);
+            float minBlink = 1.0f;
+            int firstOnset = -1;
+            for (int i = 0; i < 60; i++) {  // 4 s
+                FaceResult f = neutral;
+                if (i < 5) f.blendshapes[arkit::EYE_BLINK_L] = 1.0f;
+                s.update(f, dt);
+                float b = s.morphWeights()[av.morphOf["blink"]];
+                if (b > 0.5f && firstOnset < 0) firstOnset = i;
+                if (i >= 5) minBlink = std::min(minBlink, b);
+            }
+            CHECK(firstOnset <= 2, "user blink passes through");
+            CHECK(minBlink < 0.5f,
+                  "no procedural blink during the user-blink guard window");
+        }
+
+        // Idle disabled: nothing procedural happens
+        {
+            RigSolver s(av.model);
+            calibrate(s);
+            s.setIdleEnabled(false);
+            s.setBlinkRatePerMin(60.0f);
+            float maxBlink = 0.0f;
+            for (int i = 0; i < 90; i++) {
+                s.update(neutral, dt);
+                maxBlink = std::max(maxBlink, s.morphWeights()[av.morphOf["blink"]]);
+            }
+            CHECK(maxBlink < 0.05f, "idle off: no procedural blink");
+            CHECK(std::abs(s.breath()) < 1e-6f && std::abs(s.sway()) < 1e-6f,
+                  "idle off: breath/sway are zero");
+            float gaze = glm::degrees(glm::angle(s.eyeRotation()));
+            CHECK(gaze < 1e-4f, "idle off: no saccade offset");
+        }
+
+        // Breathing: 0.2 Hz sine at full intensity spans ±1
+        {
+            RigSolver s(av.model);
+            calibrate(s);
+            s.setIdleEnabled(true);
+            s.setIdleIntensity(1.0f);
+            float lo = 1e9f, hi = -1e9f, mean = 0.0f;
+            for (int i = 0; i < 75; i++) {  // 5 s = one full period
+                s.update(neutral, dt);
+                lo = std::min(lo, s.breath());
+                hi = std::max(hi, s.breath());
+                mean += s.breath();
+            }
+            CHECK(hi - lo > 1.5f, "breathing oscillates (0.2 Hz)");
+            CHECK(std::abs(mean / 75.0f) < 0.3f, "breathing is zero-mean");
+        }
+
+        // Weight shift: slow sway covers most of its range in ~14 s
+        {
+            RigSolver s(av.model);
+            calibrate(s);
+            s.setIdleEnabled(true);
+            s.setIdleIntensity(1.0f);
+            float maxAbs = 0.0f;
+            for (int i = 0; i < 210; i++) {  // 14 s ≈ full period
+                s.update(neutral, dt);
+                maxAbs = std::max(maxAbs, std::abs(s.sway()));
+            }
+            CHECK(maxAbs > 0.8f, "weight-shift sway reaches full amplitude");
+        }
+
+        // Micro-saccades: gaze wiggles without eyeLook input, bounded
+        {
+            RigSolver s(av.model);
+            calibrate(s);
+            s.setIdleEnabled(true);
+            s.setIdleIntensity(1.0f);
+            float maxGaze = 0.0f;
+            for (int i = 0; i < 120; i++) {  // 8 s
+                s.update(neutral, dt);
+                maxGaze = std::max(
+                    maxGaze, glm::degrees(glm::angle(s.eyeRotation())));
+            }
+            printf("  saccade-driven max gaze deviation: %.2f deg\n", maxGaze);
+            CHECK(maxGaze > 0.15f, "micro-saccades move the gaze");
+            CHECK(maxGaze < 4.0f, "saccade offsets stay small");
+        }
+
+        // Head translation / parallax (gain 1.0)
+        auto faceAt = [](float noseX, float noseY, float eyeLX, float eyeRX) {
+            FaceResult f = makeFace({}, 0, 0, 0);
+            f.landmarks[1 * 3 + 0] = noseX;
+            f.landmarks[1 * 3 + 1] = noseY;
+            f.landmarks[33 * 3 + 0] = eyeLX;
+            f.landmarks[33 * 3 + 1] = 240.0f;
+            f.landmarks[263 * 3 + 0] = eyeRX;
+            f.landmarks[263 * 3 + 1] = 240.0f;
+            return f;
+        };
+        const float eyeL = 280.0f, eyeR = 360.0f;  // span 80 px
+        {
+            RigSolver s(av.model);
+            s.startCalibration();
+            for (int i = 0; i < 35; i++) s.calibrate(faceAt(320, 240, eyeL, eyeR));
+            s.setHeadPosGain(1.0f);
+            for (int i = 0; i < 60; i++) s.update(faceAt(400, 240, eyeL, eyeR), dt);
+            float x = s.headPosition().x;
+            printf("  head pos after +1 face-span right shift: x=%.3f\n", x);
+            CHECK(x > 0.03f && x < 0.06f, "head shifts right (clamped)");
+        }
+        {
+            RigSolver s(av.model);
+            s.startCalibration();
+            for (int i = 0; i < 35; i++) s.calibrate(faceAt(320, 240, eyeL, eyeR));
+            s.setHeadPosGain(1.0f);
+            for (int i = 0; i < 60; i++) s.update(faceAt(320, 300, eyeL, eyeR), dt);
+            float y = s.headPosition().y;
+            CHECK(y < -0.025f && y > -0.05f, "head shifts down in image");
+        }
+        {
+            RigSolver s(av.model);
+            s.startCalibration();
+            for (int i = 0; i < 35; i++) s.calibrate(faceAt(320, 240, eyeL, eyeR));
+            s.setHeadPosGain(1.0f);
+            // Lean in: face 25% bigger (span 80 -> 100)
+            for (int i = 0; i < 60; i++) s.update(faceAt(320, 240, 270, 370), dt);
+            float z = s.headPosition().z;
+            printf("  head pos after lean-in: z=%.3f\n", z);
+            CHECK(z > 0.015f && z < 0.045f, "leaning in brings the head forward");
+        }
+        {
+            RigSolver s(av.model);
+            s.startCalibration();
+            for (int i = 0; i < 35; i++) s.calibrate(faceAt(320, 240, eyeL, eyeR));
+            s.setHeadPosGain(0.0f);
+            for (int i = 0; i < 60; i++) s.update(faceAt(400, 300, 270, 370), dt);
+            CHECK(glm::length(s.headPosition()) < 1e-5f,
+                  "head position gain 0 disables parallax");
+        }
+    }
+
     printf("\n%s: %d failure(s)\n", g_failures ? "FAILURES" : "ALL OK", g_failures);
     return g_failures;
 }

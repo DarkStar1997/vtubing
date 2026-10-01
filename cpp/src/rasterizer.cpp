@@ -78,7 +78,8 @@ std::vector<glm::mat4> computeWorldMatrices(const VRMModel& model) {
 
 std::vector<glm::mat4> computeWorldMatricesWithOverrides(
     const VRMModel& model,
-    const std::unordered_map<int, glm::quat>& overrides)
+    const std::unordered_map<int, glm::quat>& overrides,
+    const std::unordered_map<int, glm::vec3>* translations)
 {
     int n = static_cast<int>(model.nodes.size());
     std::vector<glm::mat4> world(n);
@@ -90,7 +91,13 @@ std::vector<glm::mat4> computeWorldMatricesWithOverrides(
         auto it = overrides.find(i);
         if (it != overrides.end())
             rot = rot * it->second;
-        glm::mat4 local = glm::translate(glm::mat4(1), model.nodes[i].translation)
+        glm::vec3 pos = model.nodes[i].translation;
+        if (translations) {
+            auto ti = translations->find(i);
+            if (ti != translations->end())
+                pos += ti->second;
+        }
+        glm::mat4 local = glm::translate(glm::mat4(1), pos)
                         * glm::mat4_cast(rot)
                         * glm::scale(glm::mat4(1), model.nodes[i].scale);
         if (model.nodes[i].parent >= 0) {
