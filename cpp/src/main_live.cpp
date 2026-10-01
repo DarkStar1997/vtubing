@@ -586,6 +586,7 @@ int main(int argc, char** argv) {
             const SettingsState& st = uiOverlay.settings;
             rigSolver.setHeadGains(st.headYawGain, st.headPitchGain, st.headRollGain);
             rigSolver.setHeadClamps(st.headMaxYaw, st.headMaxPitch, st.headMaxRoll);
+            rigSolver.setHeadSmoothing(st.headSmoothing);
             rigSolver.setGazeScale(st.gazeScale);
             switch (st.bgMode) {
                 case 1: ssfb.setClearColor(0, 0, 0, 255); break;      // black

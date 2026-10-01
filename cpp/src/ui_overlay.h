@@ -19,12 +19,14 @@ struct HUDState {
 // of the UI overlay and hides completely with the [W] visibility toggle.
 struct SettingsState {
     // Head rotation gains / clamps (mirrored into RigSolver every frame)
-    float headYawGain = 0.65f;
-    float headPitchGain = 0.65f;
-    float headRollGain = 0.65f;
+    float headYawGain = 0.55f;
+    float headPitchGain = 0.55f;
+    float headRollGain = 0.55f;
     float headMaxYaw = 35.0f;   // degrees
     float headMaxPitch = 20.0f;
     float headMaxRoll = 15.0f;
+    // 0 = responsive, 1 = very smooth (slightly more lag)
+    float headSmoothing = 0.5f;
     // Eye gaze strength multiplier
     float gazeScale = 1.0f;
     // Springbones (hair/clothes physics)
@@ -34,7 +36,7 @@ struct SettingsState {
     // Background: 0=white 1=black 2=green (chroma key) 3=transparent
     int bgMode = 0;
 
-    static constexpr int ROW_COUNT = 11;
+    static constexpr int ROW_COUNT = 12;
     int selected = 0;
 
     static const char* bgModeName(int m) {
@@ -100,11 +102,12 @@ public:
             case 3: clampStep(s.headMaxYaw, 5.0f, 90.0f, 1.0f); break;
             case 4: clampStep(s.headMaxPitch, 5.0f, 60.0f, 1.0f); break;
             case 5: clampStep(s.headMaxRoll, 5.0f, 45.0f, 1.0f); break;
-            case 6: clampStep(s.gazeScale, 0.0f, 2.0f, 0.1f); break;
-            case 7: s.springEnabled = !s.springEnabled; break;
-            case 8: clampStep(s.springStiffness, 0.0f, 2.0f, 0.1f); break;
-            case 9: clampStep(s.springGravity, 0.0f, 2.0f, 0.1f); break;
-            case 10: s.bgMode = (s.bgMode + (dir > 0 ? 1 : 3)) % 4; break;
+            case 6: clampStep(s.headSmoothing, 0.0f, 1.0f, 0.05f); break;
+            case 7: clampStep(s.gazeScale, 0.0f, 2.0f, 0.1f); break;
+            case 8: s.springEnabled = !s.springEnabled; break;
+            case 9: clampStep(s.springStiffness, 0.0f, 2.0f, 0.1f); break;
+            case 10: clampStep(s.springGravity, 0.0f, 2.0f, 0.1f); break;
+            case 11: s.bgMode = (s.bgMode + (dir > 0 ? 1 : 3)) % 4; break;
         }
     }
 
@@ -349,7 +352,7 @@ public:
         // 5. Settings panel (when showSettings is true). Part of the overlay:
         // hidden entirely when the [W] visibility toggle is off.
         if (showSettings) {
-            const SettingsState& s = settings;
+            const SettingsState& st = settings;
             const int panelW = 470;
             const int rowH = 24;
             const int panelH = 34 + SettingsState::ROW_COUNT * rowH + 10;
@@ -376,6 +379,7 @@ public:
                 r.push_back({"Head max yaw (deg)", f2(st.headMaxYaw), (st.headMaxYaw - 5) / 85.0f});
                 r.push_back({"Head max pitch (deg)", f2(st.headMaxPitch), (st.headMaxPitch - 5) / 55.0f});
                 r.push_back({"Head max roll (deg)", f2(st.headMaxRoll), (st.headMaxRoll - 5) / 40.0f});
+                r.push_back({"Head smoothing", f2(st.headSmoothing), st.headSmoothing});
                 r.push_back({"Gaze scale", f2(st.gazeScale), st.gazeScale / 2.0f});
                 r.push_back({"Springbones", std::string(st.springEnabled ? "ON" : "OFF"), -1.0f});
                 r.push_back({"Spring stiffness", f2(st.springStiffness), st.springStiffness / 2.0f});
@@ -383,14 +387,14 @@ public:
                 r.push_back({"Background", SettingsState::bgModeName(st.bgMode), -1.0f});
                 return r;
             };
-            std::vector<Row> rowList = rows(s);
+            std::vector<Row> rowList = rows(st);
 
             int itemY = currentY + 36;
             const int sliderX = hudX + panelW - 130;
             const int sliderW = 110;
             for (int i = 0; i < (int)rowList.size() && i < SettingsState::ROW_COUNT; i++) {
                 const Row& row = rowList[i];
-                bool isSel = (i == s.selected);
+                bool isSel = (i == st.selected);
                 if (isSel) {
                     drawBoxAlpha(bgra, fbW, fbH, hudX + 6, itemY, panelW - 12, rowH - 4, 30, 60, 90, 200);
                     drawBorder(bgra, fbW, fbH, hudX + 6, itemY, panelW - 12, rowH - 4, 60, 140, 220, 200);

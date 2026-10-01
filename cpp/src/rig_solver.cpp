@@ -56,6 +56,9 @@ RigSolver::RigSolver(const VRMModel& model) {
             smoothRot_[i][j] = SmoothFloat(0.1f);
         }
 
+    // Apply the default head-smoothing tuning to the head filters
+    setHeadSmoothing(headSmoothing_);
+
     // Blinks (ARKit indices 9=eyeBlinkLeft, 10=eyeBlinkRight) are very fast
     // events (100-300ms). The default 1 Hz filter only reaches ~17% per frame
     // → eyelids barely close. Use a high cutoff for near-instant response.
@@ -246,6 +249,22 @@ void RigSolver::setHeadClamps(float maxYaw, float maxPitch, float maxRoll) {
     maxYaw_ = std::max(1.0f, maxYaw);
     maxPitch_ = std::max(1.0f, maxPitch);
     maxRoll_ = std::max(1.0f, maxRoll);
+}
+
+void RigSolver::setHeadSmoothing(float s) {
+    headSmoothing_ = std::clamp(s, 0.0f, 1.0f);
+    float t = headSmoothing_;
+    // 0 → snappy (cutoff 2.5 Hz, beta 0.10, glide 40 ms)
+    // 1 → very smooth (cutoff 0.7 Hz, beta 0.00, glide 140 ms)
+    float cutoff = 2.5f + (0.7f - 2.5f) * t;
+    float beta = 0.10f * (1.0f - t);
+    float glide = 0.04f + (0.14f - 0.04f) * t;
+    yawFilter_.setParams(cutoff, beta);
+    pitchFilter_.setParams(cutoff, beta);
+    rollFilter_.setParams(cutoff, beta);
+    smoothYaw_.setSmoothTime(glide);
+    smoothPitch_.setSmoothTime(glide);
+    smoothRoll_.setSmoothTime(glide);
 }
 
 std::string RigSolver::normalizeGroupName(std::string key) {

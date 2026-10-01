@@ -8,6 +8,13 @@ public:
     OneEuroFilter(float minCutoff = 1.0f, float beta = 0.0f, float dCutoff = 1.0f)
         : minCutoff_(minCutoff), beta_(beta), dCutoff_(dCutoff) {}
 
+    // Runtime retuning (e.g. the head-smoothing knob in the settings GUI)
+    void setParams(float minCutoff, float beta, float dCutoff = 1.0f) {
+        minCutoff_ = minCutoff;
+        beta_ = beta;
+        dCutoff_ = dCutoff;
+    }
+
     float filter(float x, float dt) {
         if (dt <= 0.0f) dt = 1e-5f;
         float prevX = x_;
@@ -47,6 +54,8 @@ class SmoothFloat {
 public:
     SmoothFloat(float smoothTime = 0.1f)
         : smoothTime_(smoothTime), value_(0), velocity_(0), initialized_(false) {}
+
+    void setSmoothTime(float t) { smoothTime_ = t; }
 
     float update(float target, float dt) {
         if (!initialized_) {

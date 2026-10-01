@@ -55,6 +55,9 @@ public:
     void setHeadGains(float yaw, float pitch, float roll);
     void setHeadClamps(float maxYaw, float maxPitch, float maxRoll);
     void setGazeScale(float s) { gazeScale_ = s; }
+    // s in [0,1]: 0 responsive, 1 very smooth. Retunes the head filters
+    // (OneEuro cutoff/beta + critically-damped glide time).
+    void setHeadSmoothing(float s);
 
 private:
     struct MorphBind { int meshIdx; int targetIdx; float weight; };
@@ -63,10 +66,10 @@ private:
     std::vector<int> meshMorphBase_;
 
     std::array<OneEuroFilter, 52> bsFilters_;
-    OneEuroFilter yawFilter_{2.0f, 0.15f}, pitchFilter_{2.0f, 0.15f}, rollFilter_{2.0f, 0.15f};
+    OneEuroFilter yawFilter_{1.6f, 0.05f}, pitchFilter_{1.6f, 0.05f}, rollFilter_{1.6f, 0.05f};
 
     // Spring smoothers for gentle ease-in/ease-out on top of OneEuro filtering
-    SmoothFloat smoothYaw_{0.06f}, smoothPitch_{0.06f}, smoothRoll_{0.06f};
+    SmoothFloat smoothYaw_{0.09f}, smoothPitch_{0.09f}, smoothRoll_{0.09f};
 
     // Pose filters: rotation vectors (3 per bone) for arms + spine
     OneEuroFilter poseRotFilters_[8][3];
@@ -133,12 +136,15 @@ private:
 
     // Head rotation gain & clamp (keep thin-shell avatar front-facing).
     // Runtime-tunable via setHeadGains()/setHeadClamps().
-    float headGainYaw_ = 0.65f;
-    float headGainPitch_ = 0.65f;
-    float headGainRoll_ = 0.65f;
+    float headGainYaw_ = 0.55f;
+    float headGainPitch_ = 0.55f;
+    float headGainRoll_ = 0.55f;
     float maxYaw_ = 35.0f;
     float maxPitch_ = 20.0f;
     float maxRoll_ = 15.0f;
+    // Head smoothing 0..1: 0 = responsive (jerky tracking noise passes),
+    // 1 = very smooth (more lag). Retunes the filters below.
+    float headSmoothing_ = 0.5f;
 
     // Eye gaze (bone-type lookAt): computed from the eyeLook* blendshapes
     // scaled by the model's lookAt range maps (matching Python solver).

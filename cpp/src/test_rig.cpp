@@ -299,10 +299,11 @@ int main() {
         RigSolver solver(av.model);
         calibrate(solver);
 
-        // Default: gain 0.65, clamp 35 → yaw 40 ⇒ 26°
+        // Explicit gain 0.65 → yaw 40 ⇒ 26° (independent of default tuning)
+        solver.setHeadGains(0.65f, 0.65f, 0.65f);
         runFrames(solver, makeFace({}, 40.0f, 0, 0), 60);
         float angle = glm::degrees(glm::angle(solver.headRotation()));
-        CHECK(angle > 24.0f && angle < 28.0f, "head yaw = input * 0.65 gain");
+        CHECK(angle > 24.0f && angle < 28.0f, "head yaw = input * gain");
 
         // Tighter clamp
         solver.setHeadClamps(5.0f, 20.0f, 15.0f);
@@ -316,6 +317,35 @@ int main() {
         runFrames(solver, makeFace({}, 40.0f, 0, 0), 60);
         angle = glm::degrees(glm::angle(solver.headRotation()));
         CHECK(angle > 10.0f && angle < 14.0f, "setHeadGains scales head rotation");
+
+        // Smoothing knob: higher smoothing must suppress a jittering input.
+        // Feed alternating ±2° yaw around a 20° base; the smoothed output's
+        // peak-to-peak variation must shrink as smoothing increases.
+        auto jitterVar = [&](float smoothing) {
+            RigSolver s2(av.model);
+            calibrate(s2);
+            s2.setHeadGains(1.0f, 1.0f, 1.0f);  // isolate filtering from gain
+            s2.setHeadSmoothing(smoothing);
+            float lo = 1e9f, hi = -1e9f;
+            for (int i = 0; i < 120; i++) {
+                float yawDeg = 20.0f + ((i % 2 == 0) ? 2.0f : -2.0f);
+                s2.update(makeFace({}, yawDeg, 0, 0), 1.0f / 15.0f);
+                float e = glm::degrees(glm::angle(s2.headRotation()));
+                if (i >= 60) {  // skip convergence
+                    lo = std::min(lo, e);
+                    hi = std::max(hi, e);
+                }
+            }
+            return hi - lo;
+        };
+        float varSnappy = jitterVar(0.0f);
+        float varSmooth = jitterVar(1.0f);
+        printf("  jitter peak-to-peak: smoothing 0 → %.2f deg, smoothing 1 → %.2f deg\n",
+               varSnappy, varSmooth);
+        CHECK(varSmooth < varSnappy * 0.6f,
+              "setHeadSmoothing suppresses tracking jitter");
+        CHECK(varSmooth < 1.0f,
+              "max smoothing nearly eliminates jitter");
     }
 
     // --- Detection loss decay ---------------------------------------------
