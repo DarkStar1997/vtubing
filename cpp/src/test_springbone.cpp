@@ -147,6 +147,67 @@ int main() {
         }
     }
 
+    // --- 4. Ring-down: no sustained oscillation ---------------------------
+    // Regression test for the "avatar keeps shaking left-to-right" bug: the
+    // naive stiffness term (gap × stiffness × steps) overshoots at low frame
+    // rates (stiffness 0.5 × 3 steps at 15 fps = 1.5× the gap per frame) and
+    // drag 0.05 removes almost no energy, so chains rang indefinitely.
+    // Excite the chain with a brief parent rotation, then hold the parent
+    // still: the chain must settle back near its rest direction.
+    {
+        VRMModel m = makeModel({1, 0, 0}, {1, 0, 0}, {1, 0, 0});
+        VRMModel::SpringChain sc;
+        sc.joints = {1, 2, 3};
+        sc.stiffness = 0.5f;      // parameters of the shipped default avatar
+        sc.gravityPower = 0.0f;
+        sc.gravityDir = {0, -1, 0};
+        sc.dragForce = 0.05f;
+        sc.hitRadius = 0.02f;
+        m.springChains.push_back(sc);
+
+        SpringBoneSolver solver(m);
+        std::vector<glm::mat4> bind = bindWorld(m);
+        solver.reset(m, bind);
+
+        // World matrices with the chain's root parent rotated by `deg` (Y):
+        // the hair root turns with the head, like tracking input.
+        auto worldWithRootRot = [&](float deg) {
+            std::vector<glm::mat4> w = bind;
+            glm::mat4 r = glm::rotate(glm::mat4(1.0f), glm::radians(deg),
+                                      glm::vec3(0, 1, 0));
+            for (size_t i = 1; i < w.size(); i++)
+                w[i] = r * w[i];
+            return w;
+        };
+        // Deviation of joint 1's tail from the bind (+X) direction, degrees
+        auto deviationDeg = [&](const std::unordered_map<int, glm::quat>& over) {
+            auto it = over.find(1);
+            if (it == over.end()) return 0.0f;
+            glm::quat rot = m.nodes[1].rotation * it->second;
+            glm::vec3 dir = rot * glm::vec3(1, 0, 0);
+            return glm::degrees(std::acos(glm::clamp(dir.x, -1.0f, 1.0f)));
+        };
+
+        const float dt = 1.0f / 15.0f;  // default render cap
+        // Excite: 5 frames with the head turned 20°
+        std::unordered_map<int, glm::quat> over;
+        auto excited = worldWithRootRot(20.0f);
+        for (int i = 0; i < 5; i++) over = solver.update(m, excited, dt);
+        CHECK(deviationDeg(over) > 1.0f, "excitation bends the chain");
+        // Then hold the head still for 3 s. A couple of decaying swings in
+        // the first ~1.5 s are natural; what must NOT happen is sustained
+        // oscillation. Measure the final second.
+        float maxDevAfter = 0.0f;
+        for (int i = 0; i < 45; i++) {
+            over = solver.update(m, bind, dt);
+            if (i >= 30)  // ignore the ring-down swings of seconds 1–2
+                maxDevAfter = std::max(maxDevAfter, deviationDeg(over));
+        }
+        printf("  ring-down: max deviation in final second = %.2f deg\n", maxDevAfter);
+        CHECK(maxDevAfter < 3.0f,
+              "chain settles after excitation (no sustained oscillation)");
+    }
+
     printf("\n%s: %d failure(s)\n", g_failures ? "FAILURES" : "ALL OK", g_failures);
     return g_failures;
 }

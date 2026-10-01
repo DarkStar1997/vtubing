@@ -80,8 +80,27 @@ std::unordered_map<int, glm::quat> SpringBoneSolver::update(
     workNodes_ = model.nodes;
     std::vector<glm::mat4> w = world;
 
+    // Frame-rate-independent, stability-capped parameters.
+    //
+    // The naive "gap * stiffness * (dt*60)" spring correction overshoots
+    // whenever stiffness*steps > 1 (e.g. stiffness 0.5 at a 15 fps render
+    // cap ⇒ 1.5× the gap per frame) and drives a sustained side-to-side
+    // oscillation. Cap the per-frame correction well inside the stable
+    // region and make the drag decay per-second-equivalent, with a base
+    // damping floor so chains always settle instead of ringing forever.
     float dtSec = std::clamp(dt, 0.001f, 0.05f);
-    float step = dtSec * 60.0f;  // parameters are tuned per-60fps-step
+    float steps = dtSec * 60.0f;                 // 60fps-reference step count
+    auto springK = [&](float stiffness, float scale) {
+        // Per-frame fraction of the gap to close (≤ 0.25 keeps the verlet
+        // spring well inside the stable region for any retention ≤ 1).
+        return std::min(stiffness * scale * steps * 0.12f, 0.25f);
+    };
+    auto dragRetention = [&](float dragForce) {
+        // (1-drag) per 60fps step → per-frame retention, plus a damping
+        // floor (×0.85/frame) so low-drag models still settle quickly.
+        float base = 1.0f - std::clamp(dragForce, 0.0f, 0.98f);
+        return std::pow(base, steps) * 0.85f;
+    };
 
     // Recompute world matrices for `node` and its ancestors from the working
     // locals (spring nodes may already carry this frame's deltas).
@@ -118,9 +137,10 @@ std::unordered_map<int, glm::quat> SpringBoneSolver::update(
             glm::vec3 expected = bonePos + boneWorldRot * js.bindOffset;
 
             // Verlet: inertia (drag) + stiffness pull + gravity.
-            glm::vec3 inertia = (js.curPos - js.prevPos) * (1.0f - cs.cfg.dragForce);
+            glm::vec3 inertia =
+                (js.curPos - js.prevPos) * dragRetention(cs.cfg.dragForce);
             glm::vec3 stiff =
-                (expected - js.curPos) * cs.cfg.stiffness * stiffnessScale * step;
+                (expected - js.curPos) * springK(cs.cfg.stiffness, stiffnessScale);
             glm::vec3 grav =
                 cs.cfg.gravityDir * (cs.cfg.gravityPower * gravityScale);
             glm::vec3 next = js.curPos + inertia + stiff + grav * dtSec * dtSec;

@@ -263,6 +263,7 @@ cd cpp/build
 | `--fps <N>` | 15 | Frame-rate cap in fps (`0` = unlimited) |
 | `--bg <mode>` | white | Background: `white`, `black`, `green` (chroma key for OBS), or `transparent` (alpha screenshots; shown as a checkerboard, `P` saves PNGs with real alpha). Also changeable at runtime in the settings panel. |
 | `--no-pip` | off | Start without the webcam picture-in-picture overlay (W toggles it) |
+| `--no-spring` | off | Start with springbones disabled (hair/clothes physics; toggle at runtime in [S] Settings) |
 | `-v`, `--verbose` | off | Print diagnostics to the terminal (default: quiet; fps and calibration status are shown on the window) |
 | `[vrm_file]` | auto-detected | VRM avatar to load (`assets/avatars/male_52blendshapes.vrm`) |
 

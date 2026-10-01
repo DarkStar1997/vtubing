@@ -103,6 +103,8 @@ int main(int argc, char** argv) {
             "                   Also changeable at runtime in [S] Settings\n"
             "  --no-pip         Start without the webcam picture-in-picture\n"
             "                   overlay (W toggles it at runtime)\n"
+            "  --no-spring      Start with springbones disabled (hair/clothes\n"
+            "                   physics; toggle at runtime in [S] Settings)\n"
             "  -v, --verbose    Print diagnostics to the terminal\n"
             "                   (default: quiet; fps and calibration status\n"
             "                   are shown on the window instead)\n"
@@ -129,6 +131,7 @@ int main(int argc, char** argv) {
     int targetFps = 15;
     int initialCamIndex = 0;
     bool noPip = false;  // start without the webcam picture-in-picture overlay
+    bool disableSpring = false;  // start with springbones off (--no-spring)
     int bgMode = 0;      // 0=white 1=black 2=green 3=transparent (settings enum)
 
     for (int i = 1; i < argc; i++) {
@@ -153,6 +156,7 @@ int main(int argc, char** argv) {
             }
         }
         else if (a == "--no-pip") { noPip = true; }
+        else if (a == "--no-spring") { disableSpring = true; }
         else if (a == "-v" || a == "--verbose") { g_verbose = true; }
         else if (a == "-h" || a == "--help") { printUsage(); return 0; }
         else if (a.substr(0, 2) == "--") {
@@ -281,6 +285,7 @@ int main(int argc, char** argv) {
     }
     uiOverlay.visible = !noPip;
     uiOverlay.settings.bgMode = bgMode;  // from --bg
+    if (disableSpring) uiOverlay.settings.springEnabled = false;
 
     FaceTracker faceTracker(modelDir);
     PoseTracker poseTracker(modelDir);
@@ -866,6 +871,13 @@ int main(int argc, char** argv) {
                      faceResult.blendshapes[25], faceResult.blendshapes[44],
                      faceResult.blendshapes[9], faceResult.blendshapes[10],
                      faceResult.blendshapes[1]);
+            }
+            // Head pose diagnostics: tracker input vs solver output (degrees)
+            {
+                glm::vec3 e = glm::degrees(glm::eulerAngles(rigSolver.headRotation()));
+                VLOG("  head in: y%+.1f p%+.1f r%+.1f | out: y%+.1f p%+.1f r%+.1f | gaze: y%+.1f p%+.1f\n",
+                     faceResult.yaw, faceResult.pitch, faceResult.roll,
+                     e.y, e.x, e.z, rigSolver.eyeYawDeg(), rigSolver.eyePitchDeg());
             }
             frameCount = 0;
             detectCount = 0;
