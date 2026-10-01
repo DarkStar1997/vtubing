@@ -120,8 +120,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # -pthread: the static libstdc++ needs pthread_create; on this
+          # glibc 2.28 baseline pthreads still lives in libpthread.so
+          # (merged into libc only in glibc 2.34).
           cmake -S cpp -B cpp/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc -pthread"
           cmake --build cpp/build -j
 
       # ---------- Regression tests ----------
