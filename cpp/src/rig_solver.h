@@ -44,6 +44,18 @@ public:
     const BodyPose& bodyPose() const { return bodyPose_; }
     const std::unordered_map<int, glm::quat>& handOverrides() const { return handOverrides_; }
 
+    // Eye gaze: local rotation delta for the leftEye/rightEye bones
+    // (bone-type lookAt models). Degrees are exposed for the HUD.
+    glm::quat eyeRotation() const;
+    float eyeYawDeg() const { return eyeYawDeg_; }
+    float eyePitchDeg() const { return eyePitchDeg_; }
+    bool lookAtBoneType() const { return lookAtBoneType_; }
+
+    // Runtime-tunable knobs (adjusted from the settings GUI)
+    void setHeadGains(float yaw, float pitch, float roll);
+    void setHeadClamps(float maxYaw, float maxPitch, float maxRoll);
+    void setGazeScale(float s) { gazeScale_ = s; }
+
 private:
     struct MorphBind { int meshIdx; int targetIdx; float weight; };
     // Key: lowercased group name (preset name, or group name if preset is empty/unknown)
@@ -119,11 +131,27 @@ private:
         "nosesneerleft", "nosesneerright",
     };
 
-    // Head rotation gain & clamp (keep thin-shell avatar front-facing)
-    static constexpr float HEAD_GAIN = 0.65f;
-    static constexpr float MAX_YAW = 35.0f;
-    static constexpr float MAX_PITCH = 20.0f;
-    static constexpr float MAX_ROLL = 15.0f;
+    // Head rotation gain & clamp (keep thin-shell avatar front-facing).
+    // Runtime-tunable via setHeadGains()/setHeadClamps().
+    float headGainYaw_ = 0.65f;
+    float headGainPitch_ = 0.65f;
+    float headGainRoll_ = 0.65f;
+    float maxYaw_ = 35.0f;
+    float maxPitch_ = 20.0f;
+    float maxRoll_ = 15.0f;
+
+    // Eye gaze (bone-type lookAt): computed from the eyeLook* blendshapes
+    // scaled by the model's lookAt range maps (matching Python solver).
+    OneEuroFilter gazeYawFilter_{3.0f, 0.0f};
+    OneEuroFilter gazePitchFilter_{3.0f, 0.0f};
+    float gazeHScale_ = 10.0f;   // degrees at eyeLook weight 1.0
+    float gazeVUpScale_ = 10.0f;
+    float gazeVDownScale_ = 10.0f;
+    float gazeScale_ = 1.0f;     // user multiplier (settings GUI)
+    bool lookAtBoneType_ = true;
+    float eyeYawDeg_ = 0.0f;
+    float eyePitchDeg_ = 0.0f;
+    int eyeNodeL_ = -1, eyeNodeR_ = -1;
 
     // Pose: rest directions for arms (matching Python pipeline)
     // Python: REST_L=[1,0,0], REST_R=[-1,0,0], AXIS_FLIP=[1,1,-1]
@@ -134,4 +162,18 @@ private:
     glm::quat dirToRotation(const glm::vec3& rest, const glm::vec3& target);
     glm::quat filterRot(int idx, const glm::quat& q, float dt);
     static float jointAngle(const glm::vec3& a, const glm::vec3& b, const glm::vec3& c);
+
+    // --- Expression mapping (ARKit 52 → VRM standard expressions) ---
+    // Port of Python solver.py map_arkit_to_vrm(): drives standard VRM preset
+    // groups (aa/ih/ou/ee/oh, happy/angry/sad/surprised, blink, look*) so
+    // avatars without ARKit "Perfect Sync" groups still animate.
+    static std::string normalizeGroupName(std::string key);
+    void applyGroupWeight(const std::string& name, float w);
+    static void mapArkitToVrm(const float bs[52], float out[16]);
+    static constexpr const char* kVrmExprNames[16] = {
+        "aa", "ih", "ou", "ee", "oh",
+        "happy", "angry", "sad", "surprised",
+        "blink", "blinkleft", "blinkright",
+        "lookup", "lookdown", "lookleft", "lookright",
+    };
 };

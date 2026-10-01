@@ -13,6 +13,14 @@ struct Framebuffer {
 
     Framebuffer(int w, int h);
     void clear(float depthClear = 1.0f);
+
+    // Background clear color (default: opaque white to match the browser
+    // pipeline). With alpha 0 the framebuffer carries real transparency for
+    // compositing (OBS) and PNG screenshots.
+    uint8_t clearColor[4] = {255, 255, 255, 255};
+    void setClearColor(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+        clearColor[0] = r; clearColor[1] = g; clearColor[2] = b; clearColor[3] = a;
+    }
 };
 
 struct Timer {

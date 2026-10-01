@@ -5,11 +5,15 @@
 #include "pose_tracker.h"
 #include "hand_tracker.h"
 #include "rig_solver.h"
+#include "springbone.h"
 #include "ui_overlay.h"
 #include "logging.h"
 
 #include <SDL3/SDL.h>
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include <stb_image_write.h>
 #include <cstdio>
+#include <cctype>
 #include <cmath>
 #include <vector>
 #include <thread>
@@ -93,6 +97,10 @@ int main(int argc, char** argv) {
             "                   default frame cap\n"
             "  --fps <N>        Cap frame rate to reduce CPU usage (default: 15)\n"
             "                   Use 0 for unlimited\n"
+            "  --bg <mode>      Background: white, black, green (chroma key\n"
+            "                   for OBS), or transparent (alpha screenshots;\n"
+            "                   P saves PNG with alpha). Default: white.\n"
+            "                   Also changeable at runtime in [S] Settings\n"
             "  --no-pip         Start without the webcam picture-in-picture\n"
             "                   overlay (W toggles it at runtime)\n"
             "  -v, --verbose    Print diagnostics to the terminal\n"
@@ -105,6 +113,9 @@ int main(int argc, char** argv) {
             "  1..9             Directly select camera source\n"
             "  R                Rescan connected camera devices\n"
             "  SPACE            Calibrate neutral pose\n"
+            "  S                Toggle settings panel (head gains/clamps, gaze,\n"
+            "                   springbones, background)\n"
+            "  P                Save a PNG screenshot\n"
             "  W                Toggle picture-in-picture & UI overlay\n"
             "  ESC              Quit\n");
     };
@@ -118,6 +129,7 @@ int main(int argc, char** argv) {
     int targetFps = 15;
     int initialCamIndex = 0;
     bool noPip = false;  // start without the webcam picture-in-picture overlay
+    int bgMode = 0;      // 0=white 1=black 2=green 3=transparent (settings enum)
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -128,6 +140,18 @@ int main(int argc, char** argv) {
             if (maxThreads != 0) maxThreads = std::max(2, maxThreads);  // 0 = auto, else minimum 2
         }
         else if (a == "--fps" && i + 1 < argc) { targetFps = std::max(0, std::stoi(argv[++i])); }
+        else if (a == "--bg" && i + 1 < argc) {
+            std::string m = argv[++i];
+            for (auto& c : m) c = std::tolower(c);
+            if (m == "white") bgMode = 0;
+            else if (m == "black") bgMode = 1;
+            else if (m == "green") bgMode = 2;
+            else if (m == "transparent" || m == "alpha") bgMode = 3;
+            else {
+                fprintf(stderr, "Unknown background mode: %s (white|black|green|transparent)\n", m.c_str());
+                return 1;
+            }
+        }
         else if (a == "--no-pip") { noPip = true; }
         else if (a == "-v" || a == "--verbose") { g_verbose = true; }
         else if (a == "-h" || a == "--help") { printUsage(); return 0; }
@@ -256,11 +280,16 @@ int main(int argc, char** argv) {
         uiOverlay.setStatus("No camera - tracking disabled", 5.0f, true);
     }
     uiOverlay.visible = !noPip;
+    uiOverlay.settings.bgMode = bgMode;  // from --bg
 
     FaceTracker faceTracker(modelDir);
     PoseTracker poseTracker(modelDir);
     HandTracker handTracker(modelDir);
     RigSolver rigSolver(model);
+    SpringBoneSolver springSolver(model);
+    if (!springSolver.empty())
+        VLOG("[live] %d springbone chains, lookAt=%s\n",
+             (int)model.springChains.size(), model.lookAt.type.c_str());
 
     VLOG("[live] Face tracker initialized. Press SPACE to calibrate.\n");
 
@@ -274,6 +303,8 @@ int main(int argc, char** argv) {
 
     bool showPiP = !noPip, calibrating = false;
     bool framingApplied = false;
+    bool springInit = false;   // springbone verlet state initialized?
+    int screenshotCount = 0;
     float calibFaceMinY = 1.0f, calibFaceMaxY = 0.0f;
     int calibFaceFrames = 0;
     float smoothFps = 0.0f;  // EMA-smoothed fps for the on-window readout
@@ -438,10 +469,7 @@ int main(int argc, char** argv) {
                 else if (event.key.key == SDLK_W) {
                     showPiP = !showPiP;
                     showPiPAtomic.store(showPiP);
-                    uiOverlay.visible = showPiP;
-                    if (!uiOverlay.visible) {
-                        uiOverlay.showCameraMenu = false;
-                    }
+                    uiOverlay.toggleVisible();  // hides overlay, menus & settings
                 }
                 else if (event.key.key == SDLK_SPACE) {
                     if (!calibrating) {
@@ -459,6 +487,30 @@ int main(int argc, char** argv) {
                 }
                 else if (event.key.key == SDLK_C) {
                     uiOverlay.toggleCameraMenu();
+                }
+                else if (event.key.key == SDLK_S) {
+                    uiOverlay.toggleSettings();
+                }
+                else if (event.key.key == SDLK_P) {
+                    // Screenshot with the framebuffer's native alpha
+                    // (true transparency when background = Transparent).
+                    Framebuffer& shot = (ss > 1) ? fb : ssfb;
+                    char name[64];
+                    snprintf(name, sizeof(name), "screenshot_%03d.png", ++screenshotCount);
+                    stbi_write_png(name, shot.width, shot.height, 4, shot.color.data(),
+                                   shot.width * 4);
+                    uiOverlay.setStatus(std::string("Saved ") + name);
+                }
+                else if (uiOverlay.showSettings && uiOverlay.visible) {
+                    // Settings panel navigation (panel open ⇒ arrows adjust)
+                    if (event.key.key == SDLK_UP)
+                        uiOverlay.moveSettingSelection(-1);
+                    else if (event.key.key == SDLK_DOWN)
+                        uiOverlay.moveSettingSelection(1);
+                    else if (event.key.key == SDLK_LEFT)
+                        uiOverlay.adjustSetting(-1);
+                    else if (event.key.key == SDLK_RIGHT)
+                        uiOverlay.adjustSetting(1);
                 }
                 else if (event.key.key == SDLK_R) {
                     availableCameras = WebcamCapture::getAvailableCameras();
@@ -523,6 +575,20 @@ int main(int argc, char** argv) {
         float instFps = rawDt > 1e-4f ? 1.0f / rawDt : 0.0f;
         smoothFps = (smoothFps <= 0.0f) ? instFps : smoothFps + (instFps - smoothFps) * 0.05f;
         uiOverlay.update(dt);
+
+        // Apply settings-panel knobs (head gains/clamps, gaze, background).
+        {
+            const SettingsState& st = uiOverlay.settings;
+            rigSolver.setHeadGains(st.headYawGain, st.headPitchGain, st.headRollGain);
+            rigSolver.setHeadClamps(st.headMaxYaw, st.headMaxPitch, st.headMaxRoll);
+            rigSolver.setGazeScale(st.gazeScale);
+            switch (st.bgMode) {
+                case 1: ssfb.setClearColor(0, 0, 0, 255); break;      // black
+                case 2: ssfb.setClearColor(0, 255, 0, 255); break;    // green (chroma key)
+                case 3: ssfb.setClearColor(0, 0, 0, 0); break;        // transparent
+                default: ssfb.setClearColor(255, 255, 255, 255); break; // white
+            }
+        }
 
         // Consume async detection result (non-blocking)
         FaceResult faceResult;
@@ -641,6 +707,37 @@ int main(int argc, char** argv) {
             for (const auto& [nodeIdx, rot] : rigSolver.handOverrides())
                 overrides[nodeIdx] = rot;
 
+            // Eye gaze (bone-type lookAt): rotate the eye bones
+            if (rigSolver.lookAtBoneType()) {
+                glm::quat eyeRot = rigSolver.eyeRotation();
+                if (eyeRot != glm::quat(1, 0, 0, 0)) {
+                    auto it = model.boneNodes.find("leftEye");
+                    if (it != model.boneNodes.end()) overrides[it->second] = eyeRot;
+                    it = model.boneNodes.find("rightEye");
+                    if (it != model.boneNodes.end()) overrides[it->second] = eyeRot;
+                }
+            }
+
+            // Base world matrices: tracking overrides applied
+            std::vector<glm::mat4> baseWorld =
+                overrides.empty() ? bindWorldMatrices
+                                  : computeWorldMatricesWithOverrides(model, overrides);
+
+            // Springbones (hair/clothes physics) run on top of the tracking
+            // pose; their local deltas are merged into the override map.
+            if (uiOverlay.settings.springEnabled && !springSolver.empty()) {
+                if (!springInit) {
+                    springSolver.reset(model, bindWorldMatrices);
+                    springInit = true;
+                }
+                auto springOver = springSolver.update(
+                    model, baseWorld, dt,
+                    uiOverlay.settings.springStiffness,
+                    uiOverlay.settings.springGravity);
+                for (const auto& [nodeIdx, rot] : springOver)
+                    overrides[nodeIdx] = rot;
+            }
+
             if (!overrides.empty()) {
                 std::vector<glm::mat4> modWorld =
                     computeWorldMatricesWithOverrides(model, overrides);
@@ -705,11 +802,25 @@ int main(int argc, char** argv) {
         // Convert framebuffer RGBA to BGRA8888 for SDL
         // On little-endian, SDL_PIXELFORMAT_BGRA8888 reads bytes as [A,R,G,B]
         Framebuffer& out = (ss > 1) ? fb : ssfb;
+        bool transparentBg = (uiOverlay.settings.bgMode == 3);
         for (int i = 0; i < fbWidth * fbHeight; i++) {
-            bgraBuf[i*4+0] = 255;               // A
-            bgraBuf[i*4+1] = out.color[i*4+0];  // R
-            bgraBuf[i*4+2] = out.color[i*4+1];  // G
-            bgraBuf[i*4+3] = out.color[i*4+2];  // B
+            int x = i % fbWidth, y = i / fbWidth;
+            uint8_t a = out.color[i*4+3];
+            if (transparentBg && a < 255) {
+                // Show transparency as a checkerboard (image-editor style).
+                // P screenshots keep the real alpha channel.
+                uint8_t cb = ((x >> 3) ^ (y >> 3) & 1) ? 200 : 235;
+                float af = a / 255.0f, ia = 1.0f - af;
+                bgraBuf[i*4+0] = 255;
+                bgraBuf[i*4+1] = (uint8_t)(out.color[i*4+0] * af + cb * ia);
+                bgraBuf[i*4+2] = (uint8_t)(out.color[i*4+1] * af + cb * ia);
+                bgraBuf[i*4+3] = (uint8_t)(out.color[i*4+2] * af + cb * ia);
+            } else {
+                bgraBuf[i*4+0] = 255;               // A
+                bgraBuf[i*4+1] = out.color[i*4+0];  // R
+                bgraBuf[i*4+2] = out.color[i*4+1];  // G
+                bgraBuf[i*4+3] = out.color[i*4+2];  // B
+            }
         }
 
         // PiP overlay

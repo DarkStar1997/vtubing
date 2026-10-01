@@ -228,12 +228,15 @@ void rasterizeTri(
                                 fb.color[ci+0] = (uint8_t)(sr * texAlpha + fb.color[ci+0] * invA);
                                 fb.color[ci+1] = (uint8_t)(sg * texAlpha + fb.color[ci+1] * invA);
                                 fb.color[ci+2] = (uint8_t)(sb * texAlpha + fb.color[ci+2] * invA);
+                                // Track coverage so transparent backgrounds
+                                // composite correctly (alpha channel output).
+                                fb.color[ci+3] = (uint8_t)(texAlpha * 255.0f + fb.color[ci+3] * invA);
                             } else {
                                 fb.color[ci+0] = linToSRGB(r);
                                 fb.color[ci+1] = linToSRGB(g);
                                 fb.color[ci+2] = linToSRGB(b_);
+                                fb.color[ci+3] = 255;
                             }
-                            fb.color[ci+3] = 255;
                         }
                     }
                     z += dz_dx; u += du_dx; v += dv_dx;

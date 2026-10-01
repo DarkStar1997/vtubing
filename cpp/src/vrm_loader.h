@@ -88,7 +88,8 @@ struct VRMModel {
     //       + finger bones (leftThumbProximal, etc.)
     std::unordered_map<std::string, int> boneNodes;
 
-    // VRM 0.x blendshape groups
+    // VRM 0.x blendshape groups (VRM 1.0 expressions are converted into the
+    // same representation: presetName = preset key or "" for custom)
     struct BlendShapeBind {
         int mesh;      // glTF mesh index
         int index;     // morph target index within mesh
@@ -100,6 +101,33 @@ struct VRMModel {
         std::vector<BlendShapeBind> binds;
     };
     std::vector<BlendShapeGroup> blendShapeGroups;
+
+    // VRM lookAt configuration (0.x firstPerson / 1.0 VRMC_vrm.lookAt)
+    struct LookAtConfig {
+        std::string type = "bone";  // "bone" | "expression"
+        float hOut = 10.0f;         // horizontalInner rangeMap outputScale (degrees)
+        float vUpOut = 10.0f;       // verticalUp outputScale
+        float vDownOut = 10.0f;     // verticalDown outputScale
+    };
+    LookAtConfig lookAt;
+
+    // VRM secondary animation (springbones): hair / clothes physics
+    // Unified over VRM 0.x secondaryAnimation and VRM 1.0 VRMC_springBone.
+    struct SpringCollider {
+        int node = -1;
+        glm::vec3 offset = {0.0f, 0.0f, 0.0f};
+        float radius = 0.08f;
+    };
+    struct SpringChain {
+        std::vector<int> joints;  // node indices, root → tail
+        float stiffness = 1.0f;
+        float gravityPower = 0.0f;
+        glm::vec3 gravityDir = {0.0f, -1.0f, 0.0f};
+        float dragForce = 0.4f;
+        float hitRadius = 0.02f;
+        std::vector<SpringCollider> colliders;  // colliders for this chain
+    };
+    std::vector<SpringChain> springChains;
 
     int totalTriangles() const;
     int totalVertices() const;

@@ -52,6 +52,110 @@ static bool jsonFindVec3(const std::string& j, const std::string& key, size_t po
     return true;
 }
 
+// Find a string value following a JSON key, starting from `pos`.
+static bool jsonFindString(const std::string& j, const std::string& key, size_t pos, std::string& out) {
+    size_t kp = j.find(key, pos);
+    if (kp == std::string::npos) return false;
+    size_t colon = j.find(':', kp + key.size());
+    if (colon == std::string::npos) return false;
+    size_t vs = j.find('"', colon + 1);
+    if (vs == std::string::npos) return false;
+    size_t ve = j.find('"', vs + 1);
+    if (ve == std::string::npos) return false;
+    out = j.substr(vs + 1, ve - vs - 1);
+    return true;
+}
+
+// Find an integer value following a JSON key, starting from `pos`.
+static bool jsonFindInt(const std::string& j, const std::string& key, size_t pos, int& out) {
+    size_t kp = j.find(key, pos);
+    if (kp == std::string::npos) return false;
+    size_t colon = j.find(':', kp + key.size());
+    if (colon == std::string::npos) return false;
+    size_t ns = j.find_first_of("-0123456789", colon + 1);
+    if (ns == std::string::npos) return false;
+    size_t ne = j.find_first_not_of("-0123456789", ns + 1);
+    if (ne == std::string::npos) ne = j.size();
+    try { out = std::stoi(j.substr(ns, ne - ns)); } catch (...) { return false; }
+    return true;
+}
+
+// Iterate the top-level JSON objects of the array that follows `key`,
+// calling fn(objStart, objEnd) with the object's brace positions.
+template <typename Fn>
+static void jsonForEachObjectInArray(const std::string& j, const std::string& key, size_t pos, Fn fn) {
+    size_t kp = j.find(key, pos);
+    if (kp == std::string::npos) return;
+    size_t arrS = j.find('[', kp);
+    if (arrS == std::string::npos) return;
+    int depth = 0;
+    size_t objS = std::string::npos;
+    for (size_t k = arrS + 1; k < j.size(); k++) {
+        char c = j[k];
+        if (c == '{') {
+            if (depth == 0) objS = k;
+            depth++;
+        } else if (c == '}') {
+            depth--;
+            if (depth == 0 && objS != std::string::npos) {
+                fn(objS, k);
+                objS = std::string::npos;
+            }
+        } else if (c == ']' && depth == 0) {
+            break;
+        }
+    }
+}
+
+// Iterate the top-level JSON numbers of the array that follows `key`.
+template <typename Fn>
+static void jsonForEachIntInArray(const std::string& j, const std::string& key, size_t pos, Fn fn) {
+    size_t kp = j.find(key, pos);
+    if (kp == std::string::npos) return;
+    size_t arrS = j.find('[', kp);
+    if (arrS == std::string::npos) return;
+    int depth = 0;
+    for (size_t k = arrS + 1; k < j.size(); k++) {
+        char c = j[k];
+        if (c == '[' || c == '{') depth++;
+        else if (c == ']' || c == '}') {
+            if (depth == 0 && c == ']') break;
+            depth--;
+        } else if (depth == 0 && (c == '-' || (c >= '0' && c <= '9'))) {
+            size_t ns = k;
+            size_t ne = j.find_first_not_of("-0123456789", ns + 1);
+            if (ne == std::string::npos) ne = j.size();
+            try { fn(std::stoi(j.substr(ns, ne - ns))); } catch (...) {}
+            k = ne - 1;
+        }
+    }
+}
+
+// Iterate the top-level JSON strings of the array that follows `key`.
+template <typename Fn>
+static void jsonForEachStringInArray(const std::string& j, const std::string& key, size_t pos, Fn fn) {
+    size_t kp = j.find(key, pos);
+    if (kp == std::string::npos) return;
+    size_t arrS = j.find('[', kp);
+    if (arrS == std::string::npos) return;
+    int depth = 0;
+    size_t k = arrS + 1;
+    while (k < j.size()) {
+        char c = j[k];
+        if (c == '[' || c == '{') depth++;
+        else if (c == ']' || c == '}') {
+            if (depth == 0 && c == ']') break;
+            depth--;
+        } else if (depth == 0 && c == '"') {
+            size_t ve = j.find('"', k + 1);
+            if (ve == std::string::npos) break;
+            fn(j.substr(k + 1, ve - k - 1));
+            k = ve;
+        }
+        k++;
+    }
+}
+
 // Extract float data from a cgltf accessor into a flat vector.
 static void extractFloats(const cgltf_accessor* acc, std::vector<float>& out) {
     if (!acc) return;
@@ -123,11 +227,39 @@ VRMModel loadVRM(const std::string& path) {
     };
     std::vector<MtoonProps> mtoonMats;
 
+    // VRM 0.x springbone groups reference bones either by NAME (nested
+    // string arrays) or by node index (flat array of chain ROOTS, with the
+    // chain continuing down the node hierarchy). Nodes are not loaded yet,
+    // so both are stashed and resolved after node loading.
+    struct Vrm0xCollider { int node = -1; float offset[3] = {0, 0, 0}; float radius = 0.08f; };
+    std::vector<std::vector<Vrm0xCollider>> vrm0xColliderGroups;
+    struct Vrm0xBoneGroup {
+        float stiffness = 1.0f, gravityPower = 0.0f, dragForce = 0.4f, hitRadius = 0.02f;
+        float gravityDir[3] = {0.0f, -1.0f, 0.0f};
+        std::vector<std::vector<std::string>> nameChains;  // nested string arrays
+        std::vector<std::vector<int>> intChains;           // nested int arrays
+        std::vector<int> rootIndices;                      // flat ints: chain roots
+        std::vector<int> colliderGroups;
+    };
+    std::vector<Vrm0xBoneGroup> vrm0xBoneGroups;
+
+    // VRM 1.0 expressions reference morph-target indices that apply to every
+    // mesh; meshes are not loaded yet during extension parsing, so binds are
+    // stashed and resolved after mesh loading.
+    struct Vrm1Expression {
+        std::string name;
+        bool isCustom = false;
+        std::vector<std::pair<int, float>> binds;  // (morph target index, weight 0-1)
+    };
+    std::vector<Vrm1Expression> vrm1Expressions;
+
     for (cgltf_size i = 0; i < data->data_extensions_count; i++) {
         const cgltf_extension* ext = &data->data_extensions[i];
         if (!ext->name || !ext->data) continue;
         std::string ename(ext->name);
-        if (ename != "VRM" && ename != "VRMC_vrm") continue;
+        if (ename != "VRM" && ename != "VRMC_vrm" &&
+            ename != "VRMC_vrmExpressions" && ename != "VRMC_springBone")
+            continue;
         std::string d(ext->data);
 
         if (ename == "VRM") {
@@ -265,7 +397,141 @@ VRMModel loadVRM(const std::string& path) {
                     }
                 }
             }
-        } else {
+
+            // VRM 0.x lookAt: firstPerson.lookAtTypeName + range maps.
+            // Range maps map a blendshape input weight to eye degrees:
+            // {"xRange": 90, "yRange": 10} (inputMax, outputScale).
+            {
+                size_t fpp = d.find("\"firstPerson\"");
+                if (fpp != std::string::npos) {
+                    std::string typeName;
+                    if (jsonFindString(d, "\"lookAtTypeName\"", fpp, typeName))
+                        model.lookAt.type = (typeName == "Bone") ? "bone" : "expression";
+                    size_t rm = d.find("\"lookAtHorizontalInner\"", fpp);
+                    float yr = 10.0f;
+                    if (rm != std::string::npos && jsonFindFloat(d, "\"yRange\"", rm, yr))
+                        model.lookAt.hOut = yr;
+                    rm = d.find("\"lookAtVerticalUp\"", fpp);
+                    yr = 10.0f;
+                    if (rm != std::string::npos && jsonFindFloat(d, "\"yRange\"", rm, yr))
+                        model.lookAt.vUpOut = yr;
+                    rm = d.find("\"lookAtVerticalDown\"", fpp);
+                    yr = 10.0f;
+                    if (rm != std::string::npos && jsonFindFloat(d, "\"yRange\"", rm, yr))
+                        model.lookAt.vDownOut = yr;
+                }
+            }
+
+            // VRM 0.x secondaryAnimation (springbones)
+            {
+                size_t sa = d.find("\"secondaryAnimation\"");
+                if (sa != std::string::npos) {
+                    // colliderGroups: [{node, colliders: [{offset, radius}]}]
+                    jsonForEachObjectInArray(d, "\"colliderGroups\"", sa,
+                        [&](size_t os, size_t oe) {
+                            std::vector<Vrm0xCollider> group;
+                            int node = -1;
+                            jsonFindInt(d, "\"node\"", os, node);
+                            jsonForEachObjectInArray(d, "\"colliders\"", os,
+                                [&](size_t cs, size_t) {
+                                    Vrm0xCollider c;
+                                    c.node = node;
+                                    jsonFindVec3(d, "\"offset\"", cs, c.offset);
+                                    jsonFindFloat(d, "\"radius\"", cs, c.radius);
+                                    group.push_back(c);
+                                });
+                            vrm0xColliderGroups.push_back(std::move(group));
+                        });
+
+                    // boneGroups: [{stiffiness, gravityPower, gravityDir,
+                    //               dragForce, hitRadius, bones, colliderGroups}]
+                    jsonForEachObjectInArray(d, "\"boneGroups\"", sa,
+                        [&](size_t os, size_t oe) {
+                            Vrm0xBoneGroup bg;
+                            jsonFindFloat(d, "\"stiffiness\"", os, bg.stiffness);
+                            jsonFindFloat(d, "\"gravityPower\"", os, bg.gravityPower);
+                            jsonFindVec3(d, "\"gravityDir\"", os, bg.gravityDir);
+                            jsonFindFloat(d, "\"dragForce\"", os, bg.dragForce);
+                            jsonFindFloat(d, "\"hitRadius\"", os, bg.hitRadius);
+                            jsonForEachIntInArray(d, "\"colliderGroups\"", os,
+                                [&](int idx) { bg.colliderGroups.push_back(idx); });
+                            // bones: nested string arrays (explicit chains by
+                            // node name), nested int arrays (explicit chains
+                            // by node index), or a flat int array (chain ROOT
+                            // indices — chains continue down the hierarchy,
+                            // the format VRoid Studio exports).
+                            size_t bp = d.find("\"bones\"", os);
+                            if (bp != std::string::npos && bp < oe) {
+                                size_t outerArrS = d.find('[', bp);
+                                if (outerArrS != std::string::npos) {
+                                    int depth = 0;
+                                    size_t innerS = std::string::npos;
+                                    std::vector<std::string> flatNames;
+                                    for (size_t k = outerArrS + 1; k < d.size(); k++) {
+                                        char c = d[k];
+                                        if (c == '[') {
+                                            if (depth == 0) innerS = k;
+                                            depth++;
+                                        } else if (c == ']') {
+                                            depth--;
+                                            if (depth == 0 && innerS != std::string::npos) {
+                                                // Parse one inner array
+                                                std::vector<std::string> names;
+                                                std::vector<int> idxs;
+                                                int d2 = 0;
+                                                size_t q = innerS + 1;
+                                                while (q < k) {
+                                                    char cc = d[q];
+                                                    if (cc == '[') d2++;
+                                                    else if (cc == ']') d2--;
+                                                    else if (d2 == 0 && cc == '"') {
+                                                        size_t ve = d.find('"', q + 1);
+                                                        if (ve == std::string::npos || ve >= k) break;
+                                                        names.push_back(d.substr(q + 1, ve - q - 1));
+                                                        q = ve;
+                                                    } else if (d2 == 0 &&
+                                                               (cc == '-' || (cc >= '0' && cc <= '9'))) {
+                                                        size_t ns2 = q;
+                                                        size_t ne2 = d.find_first_not_of("-0123456789", ns2 + 1);
+                                                        if (ne2 == std::string::npos) ne2 = k;
+                                                        try { idxs.push_back(std::stoi(d.substr(ns2, ne2 - ns2))); } catch (...) {}
+                                                        q = ne2 - 1;
+                                                    }
+                                                    q++;
+                                                }
+                                                if (!names.empty())
+                                                    bg.nameChains.push_back(std::move(names));
+                                                else if (!idxs.empty())
+                                                    bg.intChains.push_back(std::move(idxs));
+                                                innerS = std::string::npos;
+                                            }
+                                        } else if (c == ']' && depth == 0) break;
+                                        else if (c == '}' && depth == 0) break;
+                                        else if (depth == 0 && c == '"') {
+                                            // flat top-level string (chain by name)
+                                            size_t ve = d.find('"', k + 1);
+                                            if (ve == std::string::npos) break;
+                                            flatNames.push_back(d.substr(k + 1, ve - k - 1));
+                                            k = ve;
+                                        } else if (depth == 0 &&
+                                                   (c == '-' || (c >= '0' && c <= '9'))) {
+                                            // flat top-level int (chain ROOT index)
+                                            size_t ns2 = k;
+                                            size_t ne2 = d.find_first_not_of("-0123456789", ns2 + 1);
+                                            if (ne2 == std::string::npos) ne2 = d.size();
+                                            try { bg.rootIndices.push_back(std::stoi(d.substr(ns2, ne2 - ns2))); } catch (...) {}
+                                            k = ne2 - 1;
+                                        }
+                                    }
+                                    if (!flatNames.empty())
+                                        bg.nameChains.push_back(std::move(flatNames));
+                                }
+                            }
+                            vrm0xBoneGroups.push_back(std::move(bg));
+                        });
+                }
+            }
+        } else if (ename == "VRMC_vrm") {
             // VRM 1.0: humanBones is dict {"head":{"node":N}, "hips":{"node":N}, ...}
             if (model.headNodeIndex < 0) {
                 // Find the "humanBones" key in the JSON
@@ -296,13 +562,161 @@ VRMModel loadVRM(const std::string& path) {
                                         if (boneName == "head") model.headNodeIndex = nodeIdx;
                                     }
                                 }
+                                // Jump past the inner {"node":N} object: count
+                                // its opening brace (skipped below) so the
+                                // matching '}' at innerEnd keeps depth
+                                // balanced when the loop head processes it.
+                                // (A plain `continue` here would skip the
+                                // loop's k++ and abort after the first bone.)
+                                size_t innerStart = d.find('{', ke);
+                                if (innerStart != std::string::npos && innerStart < innerEnd)
+                                    depth++;
                                 k = innerEnd;
-                                continue;
                             }
                             k++;
                         }
                     }
                 }
+            }
+
+            // VRM 1.0 lookAt: type + rangeMap outputScale values
+            {
+                size_t la = d.find("\"lookAt\"");
+                if (la != std::string::npos) {
+                    std::string t;
+                    if (jsonFindString(d, "\"type\"", la, t))
+                        model.lookAt.type = t;
+                    float os = 10.0f;
+                    size_t rm = d.find("\"rangeMapHorizontalInner\"", la);
+                    if (rm != std::string::npos &&
+                        jsonFindFloat(d, "\"outputScale\"", rm, os))
+                        model.lookAt.hOut = os;
+                    rm = d.find("\"rangeMapVerticalUp\"", la);
+                    if (rm != std::string::npos &&
+                        jsonFindFloat(d, "\"outputScale\"", rm, os))
+                        model.lookAt.vUpOut = os;
+                    rm = d.find("\"rangeMapVerticalDown\"", la);
+                    if (rm != std::string::npos &&
+                        jsonFindFloat(d, "\"outputScale\"", rm, os))
+                        model.lookAt.vDownOut = os;
+                }
+            }
+        } else if (ename == "VRMC_vrmExpressions") {
+            // VRM 1.0 expressions: {expressions: {preset: {...}, custom: {...}}}
+            // Morph binds carry a morph-target index + 0-1 weight and apply to
+            // every mesh; converted to the 0.x-style group representation.
+            size_t ep = d.find("\"expressions\"");
+            if (ep != std::string::npos) {
+                auto parseExpressionMap = [&](const char* sectionKey, bool isCustom) {
+                    size_t sp = d.find(sectionKey, ep);
+                    if (sp == std::string::npos) return;
+                    // Each key in this object is an expression name; its value
+                    // object holds binds[]. Walk top-level key/value pairs.
+                    size_t objS = d.find('{', sp);
+                    if (objS == std::string::npos) return;
+                    int depth = 0;
+                    size_t k = objS;
+                    while (k < d.size()) {
+                        char c = d[k];
+                        if (c == '{') { depth++; if (depth == 1) { k++; continue; } }
+                        else if (c == '}') { depth--; if (depth == 0) break; }
+                        else if (depth == 1 && c == '"') {
+                            size_t ve = d.find('"', k + 1);
+                            if (ve == std::string::npos) break;
+                            std::string exprName = d.substr(k + 1, ve - k - 1);
+                            // value object spans until its matching close brace
+                            size_t vStart = d.find('{', ve);
+                            if (vStart == std::string::npos) break;
+                            int vDepth = 0;
+                            size_t vEnd = vStart;
+                            for (; vEnd < d.size(); vEnd++) {
+                                if (d[vEnd] == '{') vDepth++;
+                                else if (d[vEnd] == '}') { vDepth--; if (vDepth == 0) break; }
+                            }
+                            Vrm1Expression raw;
+                            raw.name = exprName;
+                            raw.isCustom = isCustom;
+                            jsonForEachObjectInArray(d, "\"binds\"", vStart,
+                                [&](size_t bs, size_t) {
+                                    int morphIdx = -1;
+                                    float weight = 1.0f;
+                                    jsonFindInt(d, "\"expression\"", bs, morphIdx);
+                                    jsonFindFloat(d, "\"weight\"", bs, weight);
+                                    if (morphIdx >= 0)
+                                        raw.binds.push_back({morphIdx, weight});
+                                });
+                            if (!raw.binds.empty())
+                                vrm1Expressions.push_back(std::move(raw));
+                            k = vEnd;
+                        }
+                        k++;
+                    }
+                };
+                parseExpressionMap("\"preset\"", false);
+                parseExpressionMap("\"custom\"", true);
+            }
+        } else if (ename == "VRMC_springBone") {
+            // VRM 1.0 springbone: colliders (node + sphere shape),
+            // colliderGroups (name + collider indices), springs (joints).
+            std::vector<VRMModel::SpringCollider> colliders1;
+            size_t cp = d.find("\"colliders\"");
+            if (cp != std::string::npos) {
+                jsonForEachObjectInArray(d, "\"colliders\"", cp,
+                    [&](size_t os, size_t) {
+                        VRMModel::SpringCollider c;
+                        jsonFindInt(d, "\"node\"", os, c.node);
+                        jsonFindVec3(d, "\"offset\"", os, &c.offset[0]);
+                        jsonFindFloat(d, "\"radius\"", os, c.radius);
+                        colliders1.push_back(c);
+                    });
+            }
+            // colliderGroups: [{name, colliders: [indices]}]
+            std::vector<std::vector<int>> colliderGroups1;
+            size_t gp = d.find("\"colliderGroups\"");
+            if (gp != std::string::npos) {
+                jsonForEachObjectInArray(d, "\"colliderGroups\"", gp,
+                    [&](size_t os, size_t) {
+                        std::vector<int> idxs;
+                        jsonForEachIntInArray(d, "\"colliders\"", os,
+                            [&](int idx) { idxs.push_back(idx); });
+                        colliderGroups1.push_back(std::move(idxs));
+                    });
+            }
+            size_t spp = d.find("\"springs\"");
+            if (spp != std::string::npos) {
+                jsonForEachObjectInArray(d, "\"springs\"", spp,
+                    [&](size_t os, size_t) {
+                        VRMModel::SpringChain sc;
+                        jsonForEachObjectInArray(d, "\"joints\"", os,
+                            [&](size_t js, size_t) {
+                                int node = -1;
+                                jsonFindInt(d, "\"node\"", js, node);
+                                if (node >= 0) sc.joints.push_back(node);
+                            });
+                        if (sc.joints.empty()) return;
+                        // Per-joint params: take them from the first joint
+                        // (chains animate uniformly in practice).
+                        size_t j0 = d.find("\"joints\"", os);
+                        if (j0 != std::string::npos) {
+                            float f;
+                            if (jsonFindFloat(d, "\"hitRadius\"", j0, f)) sc.hitRadius = f;
+                            if (jsonFindFloat(d, "\"stiffness\"", j0, f)) sc.stiffness = f;
+                            if (jsonFindFloat(d, "\"gravityPower\"", j0, f)) sc.gravityPower = f;
+                            if (jsonFindFloat(d, "\"dragForce\"", j0, f)) sc.dragForce = f;
+                            jsonFindVec3(d, "\"gravityDir\"", j0, &sc.gravityDir[0]);
+                        }
+                        jsonForEachIntInArray(d, "\"colliderGroups\"", os,
+                            [&](int gIdx) {
+                                if (gIdx >= 0 && gIdx < (int)colliderGroups1.size()) {
+                                    for (int cIdx : colliderGroups1[gIdx]) {
+                                        if (cIdx >= 0 && cIdx < (int)colliders1.size())
+                                            sc.colliders.push_back(colliders1[cIdx]);
+                                    }
+                                }
+                            });
+                        if (sc.joints.size() >= 2)
+                            model.springChains.push_back(std::move(sc));
+                    });
             }
         }
     }
@@ -347,6 +761,78 @@ VRMModel loadVRM(const std::string& path) {
             int childIdx = static_cast<int>(n->children[j] - data->nodes);
             model.nodes[childIdx].parent = static_cast<int>(i);
             model.nodes[i].children.push_back(childIdx);
+        }
+    }
+
+    // Resolve VRM 0.x springbone chains → node indices
+    if (!vrm0xBoneGroups.empty()) {
+        std::unordered_map<std::string, int> nodeByName;
+        for (size_t ni = 0; ni < model.nodes.size(); ni++)
+            if (!model.nodes[ni].name.empty())
+                nodeByName[model.nodes[ni].name] = (int)ni;
+
+        for (const auto& bg : vrm0xBoneGroups) {
+            // Gather colliders from referenced collider groups
+            std::vector<VRMModel::SpringCollider> chainColliders;
+            for (int gi : bg.colliderGroups) {
+                if (gi >= 0 && gi < (int)vrm0xColliderGroups.size()) {
+                    for (const auto& c : vrm0xColliderGroups[gi]) {
+                        VRMModel::SpringCollider sc;
+                        sc.node = c.node;
+                        sc.offset = glm::vec3(c.offset[0], c.offset[1], c.offset[2]);
+                        sc.radius = c.radius;
+                        chainColliders.push_back(sc);
+                    }
+                }
+            }
+
+            auto validChain = [&](const std::vector<int>& joints) {
+                if (joints.size() < 2) return false;
+                for (int j : joints)
+                    if (j < 0 || j >= (int)model.nodes.size()) return false;
+                return true;
+            };
+            auto pushChain = [&](std::vector<int>&& joints) {
+                if (!validChain(joints)) return;
+                VRMModel::SpringChain sc;
+                sc.joints = std::move(joints);
+                sc.stiffness = bg.stiffness;
+                sc.gravityPower = bg.gravityPower;
+                sc.gravityDir = glm::vec3(bg.gravityDir[0], bg.gravityDir[1], bg.gravityDir[2]);
+                sc.dragForce = bg.dragForce;
+                sc.hitRadius = bg.hitRadius;
+                sc.colliders = chainColliders;
+                model.springChains.push_back(std::move(sc));
+            };
+
+            // Chains listed by node name
+            for (const auto& chain : bg.nameChains) {
+                std::vector<int> joints;
+                for (const auto& boneName : chain) {
+                    auto it = nodeByName.find(boneName);
+                    if (it != nodeByName.end()) joints.push_back(it->second);
+                }
+                pushChain(std::move(joints));
+            }
+            // Chains listed explicitly by node index
+            for (const auto& chain : bg.intChains)
+                pushChain(std::vector<int>(chain));
+            // Flat root indices: the chain continues down the hierarchy
+            // (single-child walk, matching how the exporter builds them)
+            for (int root : bg.rootIndices) {
+                if (root < 0 || root >= (int)model.nodes.size()) continue;
+                std::vector<int> chain{root};
+                int cur = root;
+                while (chain.size() < 32) {
+                    const auto& n = model.nodes[cur];
+                    if (n.children.size() != 1) break;
+                    int next = n.children[0];
+                    if (next < 0 || next >= (int)model.nodes.size()) break;
+                    chain.push_back(next);
+                    cur = next;
+                }
+                pushChain(std::move(chain));
+            }
         }
     }
 
@@ -502,6 +988,30 @@ VRMModel loadVRM(const std::string& path) {
             if (meshIdx < (int)model.meshes.size())
                 model.meshes[meshIdx].nodeIndex = static_cast<int>(i);
         }
+    }
+
+    // Resolve VRM 1.0 expressions: each morph bind applies to every mesh
+    // that has that morph target. (Deferred until here because meshes are
+    // loaded after the extension section.)
+    for (const auto& e : vrm1Expressions) {
+        VRMModel::BlendShapeGroup g;
+        g.name = e.name;
+        g.presetName = e.isCustom ? "" : e.name;
+        for (const auto& [morphIdx, weight] : e.binds) {
+            if (morphIdx < 0) continue;
+            for (size_t mi = 0; mi < model.meshes.size(); mi++) {
+                if (!model.meshes[mi].primitives.empty() &&
+                    model.meshes[mi].primitives[0].morphCount > morphIdx) {
+                    VRMModel::BlendShapeBind b;
+                    b.mesh = (int)mi;
+                    b.index = morphIdx;
+                    b.weight = weight * 100.0f;  // 0-1 → 0-100
+                    g.binds.push_back(b);
+                }
+            }
+        }
+        if (!g.binds.empty())
+            model.blendShapeGroups.push_back(std::move(g));
     }
 
     // Bounding box from all positions

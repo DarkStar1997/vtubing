@@ -237,7 +237,14 @@ BS::thread_pool, cgltf, stb) are fetched automatically by CMake.
 |---|---|
 | `vtuber_live` | Live webcam tracking + real-time avatar rendering |
 | `vtuber_cpu` | Offline benchmark renderer |
-| `test_tracker` | Static image inference test |
+| `test_tracker` | Static image inference test (needs an image argument) |
+| `test_calibration` | Rig calibration regression tests |
+| `test_rig` | ARKit→VRM expression mapping, gaze, head-knob regression tests |
+| `test_springbone` | Springbone physics regression tests |
+| `test_render` | Expression-driven render pixel-diff tests (uses the default avatar) |
+| `test_vrm_loader` | VRM 1.0 expressions / lookAt / springbone parsing tests (fixture) |
+
+All regression tests are wired into CTest: run `ctest` from the build directory.
 
 ## Running
 
@@ -254,6 +261,7 @@ cd cpp/build
 | `--cam <index>` | 0 | Initial webcam device index |
 | `--threads <N>` | 2 | Renderer worker threads, minimum 2 (`0` = automatic, up to 16) |
 | `--fps <N>` | 15 | Frame-rate cap in fps (`0` = unlimited) |
+| `--bg <mode>` | white | Background: `white`, `black`, `green` (chroma key for OBS), or `transparent` (alpha screenshots; shown as a checkerboard, `P` saves PNGs with real alpha). Also changeable at runtime in the settings panel. |
 | `--no-pip` | off | Start without the webcam picture-in-picture overlay (W toggles it) |
 | `-v`, `--verbose` | off | Print diagnostics to the terminal (default: quiet; fps and calibration status are shown on the window) |
 | `[vrm_file]` | auto-detected | VRM avatar to load (`assets/avatars/male_52blendshapes.vrm`) |
@@ -297,8 +305,42 @@ usage stays around one core regardless of pool size.
 | `1`–`9` | Directly select camera source |
 | `R` | Rescan connected camera devices |
 | `SPACE` | Calibrate / re-calibrate neutral pose (face, body, hands) and camera framing |
-| `W` | Toggle picture-in-picture webcam & UI overlay (incl. fps readout and calibration banner) |
+| `S` | Toggle settings panel (see below) |
+| `P` | Save a PNG screenshot (`screenshot_NNN.png`, real alpha when background = transparent) |
+| `W` | Toggle picture-in-picture webcam & UI overlay (incl. fps readout, menus and settings panel) |
 | `ESC` | Quit |
+
+### Settings panel (`S`)
+
+Runtime-tunable knobs, adjusted with `UP`/`DOWN` (select) and `LEFT`/`RIGHT`
+(adjust). The panel is part of the UI overlay and hides completely with the
+`W` visibility toggle.
+
+| Setting | Range | Description |
+|---|---|---|
+| Head yaw/pitch/roll gain | 0–1 | Tracking-to-bone rotation scale (default 0.65) |
+| Head max yaw/pitch/roll | 5–90° | Rotation clamps (defaults 35/20/15°) |
+| Gaze scale | 0–2 | Eye-gaze strength multiplier on the model's lookAt range maps |
+| Springbones | on/off | Hair/clothes physics |
+| Spring stiffness / gravity | 0–2 | Springbone parameter multipliers |
+| Background | 4 modes | White / black / green (chroma key) / transparent |
+
+## Avatar feature support
+
+| Feature | VRM 0.x | VRM 1.0 |
+|---|---|---|
+| ARKit "Perfect Sync" blendshapes | direct passthrough | direct passthrough |
+| Standard expressions (`aa`/`ih`/`ou`/`ee`/`oh`, `happy`, `angry`, `sad`, `surprised`, `blink`, `look*`) | via 0.x preset rename (`a`→`aa`, `joy`→`happy`, …) + ARKit formula mapping | `VRMC_vrmExpressions` (preset + custom) |
+| Eye gaze | bone-type lookAt (`firstPerson` range maps) or look* expressions | bone-type lookAt (`rangeMap*`) or expressions |
+| Springbones (hair/clothes) | `secondaryAnimation` (name chains, node-index chains, and flat root lists) | `VRMC_springBone` (incl. sphere colliders) |
+
+The ARKit→VRM expression mapping mirrors the Python pipeline's
+`map_arkit_to_vrm` (visemes from jaw/funnel/pucker/stretch, emotions from
+brow/smile/frown/sneer combinations, combined blink, look helpers), so
+standard-preset avatars animate without ARKit morph sets. Eye gaze scales the
+`eyeLook*` blendshapes by the model's lookAt range maps into leftEye/rightEye
+bone rotation (matching the Python renderer's `R_y(-yaw) · R_x(pitch)`
+convention).
 
 ## GPU usage
 

@@ -38,8 +38,15 @@ Framebuffer::Framebuffer(int w, int h)
     : width(w), height(h), color(w * h * 4, 0), depth(w * h, 1.0f) {}
 
 void Framebuffer::clear(float depthClear) {
-    // White background to match browser (three-vrm with transparent canvas over white page)
-    memset(color.data(), 255, width * height * 4);
+    // Default white background matches the browser pipeline (three-vrm over
+    // a white page); setClearColor() overrides (e.g. transparent for
+    // compositing / screenshots with alpha).
+    for (int i = 0; i < width * height; i++) {
+        color[i * 4 + 0] = clearColor[0];
+        color[i * 4 + 1] = clearColor[1];
+        color[i * 4 + 2] = clearColor[2];
+        color[i * 4 + 3] = clearColor[3];
+    }
     std::fill(depth.begin(), depth.end(), depthClear);
 }
 
@@ -617,7 +624,7 @@ void downsample2x2(const Framebuffer& ss, Framebuffer& out, int numThreads) {
                 outRow[oi+0] = (uint8_t)((p0[0] + p1[0] + p2[0] + p3[0] + 2) >> 2);
                 outRow[oi+1] = (uint8_t)((p0[1] + p1[1] + p2[1] + p3[1] + 2) >> 2);
                 outRow[oi+2] = (uint8_t)((p0[2] + p1[2] + p2[2] + p3[2] + 2) >> 2);
-                outRow[oi+3] = 255;
+                outRow[oi+3] = (uint8_t)((p0[3] + p1[3] + p2[3] + p3[3] + 2) >> 2);
                 float dmin = drow0[sx0];
                 if (drow0[sx1] < dmin) dmin = drow0[sx1];
                 if (drow1[sx0] < dmin) dmin = drow1[sx0];

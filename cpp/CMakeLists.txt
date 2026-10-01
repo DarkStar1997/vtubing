@@ -204,6 +204,7 @@ set(VTUBER_LIVE_SOURCES
     src/pose_tracker.cpp
     src/hand_tracker.cpp
     src/rig_solver.cpp
+    src/springbone.cpp
     ${RENDER_SOURCES})
 if(UNIX AND NOT APPLE)
     # EGL symbol stubs force MediaPipe onto pure-CPU path on Linux (compiled
@@ -295,6 +296,73 @@ if(UNIX)
         BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/lib"
         INSTALL_RPATH "$ORIGIN")
 endif()
+
+# --- Rig regression tests (synthetic faces, no camera/tracking needed) ---
+# test_rig: ARKit→VRM expression mapping, blink combining, ARKit passthrough,
+# gaze angle math, head gain/clamp knobs, 0.x preset rename.
+add_executable(test_rig
+    src/test_rig.cpp
+    src/rig_solver.cpp
+    ${RENDER_SOURCES})
+
+target_include_directories(test_rig PRIVATE
+    src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${THIRD_PARTY_DIR}
+    ${bs_thread_pool_SOURCE_DIR}/include)
+
+target_link_libraries(test_rig PRIVATE glm::glm)
+
+# test_springbone: verlet chain falls under gravity, colliders push out,
+# bone length is preserved.
+add_executable(test_springbone
+    src/test_springbone.cpp
+    src/springbone.cpp)
+
+target_include_directories(test_springbone PRIVATE
+    src
+    ${THIRD_PARTY_DIR}
+    ${bs_thread_pool_SOURCE_DIR}/include)
+
+target_link_libraries(test_springbone PRIVATE glm::glm)
+
+# test_render: expression-driven render pixel diffs (port of Python
+# test_rig.py): neutral vs aa/blink/gaze, transparent-background alpha.
+# Needs a VRM file: default avatar, or first CLI argument.
+add_executable(test_render
+    src/test_render.cpp
+    src/rig_solver.cpp
+    ${RENDER_SOURCES})
+
+target_include_directories(test_render PRIVATE
+    src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${THIRD_PARTY_DIR}
+    ${bs_thread_pool_SOURCE_DIR}/include)
+
+target_link_libraries(test_render PRIVATE glm::glm)
+
+# test_vrm_loader: VRM 1.0 expressions / lookAt / springbone parsing against
+# a checked-in fixture.
+add_executable(test_vrm_loader
+    src/test_vrm_loader.cpp
+    src/vrm_loader.cpp)
+
+target_include_directories(test_vrm_loader PRIVATE
+    src
+    ${THIRD_PARTY_DIR})
+
+target_link_libraries(test_vrm_loader PRIVATE glm::glm)
+
+enable_testing()
+foreach(t test_calibration test_rig test_springbone)
+    add_test(NAME ${t} COMMAND ${t})
+endforeach()
+# test_render needs the avatar model from the repo's assets directory
+add_test(NAME test_render COMMAND test_render
+    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/avatars/male_52blendshapes.vrm)
+add_test(NAME test_vrm_loader COMMAND test_vrm_loader
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/vrm1_minimal.vrm)
 
 # --- Windows: copy runtime DLLs next to the executables ---
 if(WIN32)

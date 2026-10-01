@@ -20,13 +20,32 @@ RigSolver::RigSolver(const VRMModel& model) {
             key = group.name;
             for (auto& c : key) c = std::tolower(c);
         }
+        // Normalize VRM 0.x presets to VRM 1.0 expression names (same table
+        // as Python vrm_loader._VRM0X_PRESET_MAP) so standard-preset avatars
+        // are driven by the ARKit→VRM expression mapping below.
+        key = normalizeGroupName(key);
         std::vector<MorphBind> binds;
         for (auto& b : group.binds) {
             if (b.mesh < (int)meshMorphBase.size()) {
                 binds.push_back({b.mesh, b.index, b.weight / 100.0f});
             }
         }
-        groupToMorphs_[key] = binds;
+        // Merge (rather than overwrite) so models that carry both a standard
+        // preset and a custom group with the same normalized key accumulate.
+        auto& slot = groupToMorphs_[key];
+        slot.insert(slot.end(), binds.begin(), binds.end());
+    }
+
+    // LookAt configuration from the model (range maps → eye degrees)
+    lookAtBoneType_ = (model.lookAt.type != "expression");
+    gazeHScale_ = model.lookAt.hOut;
+    gazeVUpScale_ = model.lookAt.vUpOut;
+    gazeVDownScale_ = model.lookAt.vDownOut;
+    {
+        auto it = model.boneNodes.find("leftEye");
+        if (it != model.boneNodes.end()) eyeNodeL_ = it->second;
+        it = model.boneNodes.find("rightEye");
+        if (it != model.boneNodes.end()) eyeNodeR_ = it->second;
     }
 
     // Pose rotation filters: lower min_cutoff for gentle small movements,
@@ -89,6 +108,8 @@ void RigSolver::startCalibration() {
     yawFilter_.reset();
     pitchFilter_.reset();
     rollFilter_.reset();
+    gazeYawFilter_.reset();
+    gazePitchFilter_.reset();
     smoothYaw_.reset();
     smoothPitch_.reset();
     smoothRoll_.reset();
@@ -123,6 +144,10 @@ void RigSolver::update(const FaceResult& face, float dt) {
         float decay = std::exp(-dt / 0.2f);
         for (auto& w : morphWeights_) w *= decay;
         headRot_ = glm::slerp(headRot_, glm::quat(1, 0, 0, 0), 1.0f - decay);
+        // Decay gaze angles to neutral along with expressions (matching
+        // Python _handle_loss).
+        eyeYawDeg_ *= decay;
+        eyePitchDeg_ *= decay;
         yawFilter_.reset();
         pitchFilter_.reset();
         rollFilter_.reset();
@@ -155,12 +180,23 @@ void RigSolver::update(const FaceResult& face, float dt) {
         }
     }
 
+    // ARKit → VRM standard expressions: drives preset groups (aa/ih/ou/ee/oh,
+    // happy/angry/sad/surprised, blink, look*) on avatars that don't ship
+    // ARKit "Perfect Sync" groups. Perfect-Sync models are unaffected (their
+    // groups match ARKit names directly above).
+    {
+        float expr[16];
+        mapArkitToVrm(filteredBs, expr);
+        for (int e = 0; e < 16; e++)
+            if (expr[e] > 0.001f) applyGroupWeight(kVrmExprNames[e], expr[e]);
+    }
+
     float yaw = face.yaw - neutralYaw_;
     float pitch = face.pitch - neutralPitch_;
     float roll = face.roll - neutralRoll_;
-    yaw = std::clamp(yaw * HEAD_GAIN, -MAX_YAW, MAX_YAW);
-    pitch = std::clamp(pitch * HEAD_GAIN, -MAX_PITCH, MAX_PITCH);
-    roll = std::clamp(roll * HEAD_GAIN, -MAX_ROLL, MAX_ROLL);
+    yaw = std::clamp(yaw * headGainYaw_, -maxYaw_, maxYaw_);
+    pitch = std::clamp(pitch * headGainPitch_, -maxPitch_, maxPitch_);
+    roll = std::clamp(roll * headGainRoll_, -maxRoll_, maxRoll_);
     yaw = yawFilter_.filter(yaw, dt);
     pitch = pitchFilter_.filter(pitch, dt);
     roll = rollFilter_.filter(roll, dt);
@@ -173,6 +209,106 @@ void RigSolver::update(const FaceResult& face, float dt) {
     glm::quat qPitch = glm::angleAxis(glm::radians(-pitch), glm::vec3(1, 0, 0));
     glm::quat qRoll = glm::angleAxis(glm::radians(roll), glm::vec3(0, 0, 1));
     headRot_ = qYaw * qPitch * qRoll;
+
+    // Eye gaze from the eyeLook* blendshapes, scaled by the model's lookAt
+    // range maps (Python solver._compute_gaze_angles).
+    {
+        float lookUp = std::max(filteredBs[17], filteredBs[18]);    // eyeLookUp L/R
+        float lookDown = std::max(filteredBs[11], filteredBs[12]);  // eyeLookDown L/R
+        float lookLeft = std::max(filteredBs[15], filteredBs[14]);  // eyeLookOutL / eyeLookInR
+        float lookRight = std::max(filteredBs[13], filteredBs[16]); // eyeLookInL / eyeLookOutR
+        float yawDeg = (lookRight - lookLeft) * gazeHScale_;
+        float pitchDeg = lookUp * gazeVUpScale_ - lookDown * gazeVDownScale_;
+        // User gaze-strength multiplier applies to both axes
+        yawDeg *= gazeScale_;
+        pitchDeg *= gazeScale_;
+        eyeYawDeg_ = gazeYawFilter_.filter(yawDeg, dt);
+        eyePitchDeg_ = gazePitchFilter_.filter(pitchDeg, dt);
+    }
+}
+
+glm::quat RigSolver::eyeRotation() const {
+    // positive yaw = look right → negative Y rotation
+    // positive pitch = look up → positive X rotation
+    // (matches Python renderer._compute_eye_bone_quat)
+    glm::quat qYaw = glm::angleAxis(glm::radians(-eyeYawDeg_), glm::vec3(0, 1, 0));
+    glm::quat qPitch = glm::angleAxis(glm::radians(eyePitchDeg_), glm::vec3(1, 0, 0));
+    return qYaw * qPitch;
+}
+
+void RigSolver::setHeadGains(float yaw, float pitch, float roll) {
+    headGainYaw_ = std::clamp(yaw, 0.0f, 1.0f);
+    headGainPitch_ = std::clamp(pitch, 0.0f, 1.0f);
+    headGainRoll_ = std::clamp(roll, 0.0f, 1.0f);
+}
+
+void RigSolver::setHeadClamps(float maxYaw, float maxPitch, float maxRoll) {
+    maxYaw_ = std::max(1.0f, maxYaw);
+    maxPitch_ = std::max(1.0f, maxPitch);
+    maxRoll_ = std::max(1.0f, maxRoll);
+}
+
+std::string RigSolver::normalizeGroupName(std::string key) {
+    // VRM 0.x blendshape preset → VRM 1.0 expression name
+    // (Python vrm_loader._VRM0X_PRESET_MAP)
+    static const std::unordered_map<std::string, std::string> kPresetMap = {
+        {"a", "aa"}, {"i", "ih"}, {"u", "ou"}, {"e", "ee"}, {"o", "oh"},
+        {"blink_l", "blinkleft"}, {"blink_r", "blinkright"},
+        {"fun", "relaxed"}, {"joy", "happy"}, {"sorrow", "sad"},
+    };
+    auto it = kPresetMap.find(key);
+    return (it != kPresetMap.end()) ? it->second : key;
+}
+
+void RigSolver::applyGroupWeight(const std::string& name, float w) {
+    auto it = groupToMorphs_.find(name);
+    if (it == groupToMorphs_.end()) return;
+    for (auto& bind : it->second) {
+        if (bind.meshIdx < (int)meshMorphBase_.size()) {
+            int idx = meshMorphBase_[bind.meshIdx] + bind.targetIdx;
+            if (idx >= 0 && idx < (int)morphWeights_.size())
+                morphWeights_[idx] = std::max(morphWeights_[idx], w * bind.weight);
+        }
+    }
+}
+
+void RigSolver::mapArkitToVrm(const float bs[52], float out[16]) {
+    auto clamp01 = [](float v) { return std::clamp(v, 0.0f, 1.0f); };
+    auto mx = [&](int a, int b) { return std::max(bs[a], bs[b]); };
+    auto mn = [&](int a, int b) { return std::min(bs[a], bs[b]); };
+
+    float blink = mx(9, 10);                       // eyeBlink L/R
+    float lookUp = mx(17, 18);                     // eyeLookUp L/R
+    float lookDown = mx(11, 12);                   // eyeLookDown L/R
+    float lookLeft = std::max(bs[15], bs[14]);     // eyeLookOutLeft / eyeLookInRight
+    float lookRight = std::max(bs[13], bs[16]);    // eyeLookInLeft / eyeLookOutRight
+
+    float jaw = bs[25];                            // jawOpen
+    float stretch = mx(46, 47);                    // mouthStretch L/R
+    float funnel = bs[32];                         // mouthFunnel
+    float pucker = bs[38];                         // mouthPucker
+    float smile = mn(44, 45);                      // mouthSmile L/R
+
+    // Visemes
+    out[0] = clamp01(jaw);                                            // aa
+    out[1] = clamp01(std::min(jaw * 0.3f, 0.3f) + stretch * 0.7f);   // ih
+    out[2] = clamp01(std::max(funnel, pucker));                       // ou
+    out[3] = clamp01(stretch * 0.5f + smile * 0.3f);                  // ee
+    out[4] = clamp01(std::max(funnel, pucker) * 0.5f + jaw * 0.3f);   // oh
+    // Emotions
+    out[5] = clamp01(smile);                                          // happy
+    out[6] = clamp01(mx(2, 3) * 0.7f + mx(50, 51) * 0.3f);            // angry
+    out[7] = clamp01(mx(30, 31) * 0.7f + bs[1] * 0.3f);               // sad
+    out[8] = clamp01(mx(4, 5) * 0.3f + mx(21, 22) * 0.3f + jaw * 0.4f); // surprised
+    // Blink
+    out[9] = clamp01(blink);                                          // blink
+    out[10] = clamp01(bs[9]);                                         // blinkleft
+    out[11] = clamp01(bs[10]);                                        // blinkright
+    // Look (drives look* expression groups; also used for bone gaze)
+    out[12] = clamp01(lookUp);                                        // lookup
+    out[13] = clamp01(lookDown);                                      // lookdown
+    out[14] = clamp01(lookLeft);                                      // lookleft
+    out[15] = clamp01(lookRight);                                     // lookright
 }
 
 glm::quat RigSolver::dirToRotation(const glm::vec3& rest, const glm::vec3& target) {

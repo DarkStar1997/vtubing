@@ -22,6 +22,8 @@ assets/models/*.onnx
 *.vrm
 *.glb
 *.gltf
+# ...except the tiny generated VRM 1.0 test fixture (committed, needed by ctest)
+!cpp/tests/fixtures/*.vrm
 
 # ONNX Runtime (pre-built, downloaded separately)
 cpp/third_party/onnxruntime-linux-x64-*/

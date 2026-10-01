@@ -5,6 +5,7 @@
 #include <string>
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 
 // Per-frame state for the on-window HUD (fps readout, calibration banner).
 struct HUDState {
@@ -14,21 +15,97 @@ struct HUDState {
     int calibTarget = 30;       // frames needed to complete
 };
 
+// Runtime-tunable knobs shown in the settings panel ([S]). The panel is part
+// of the UI overlay and hides completely with the [W] visibility toggle.
+struct SettingsState {
+    // Head rotation gains / clamps (mirrored into RigSolver every frame)
+    float headYawGain = 0.65f;
+    float headPitchGain = 0.65f;
+    float headRollGain = 0.65f;
+    float headMaxYaw = 35.0f;   // degrees
+    float headMaxPitch = 20.0f;
+    float headMaxRoll = 15.0f;
+    // Eye gaze strength multiplier
+    float gazeScale = 1.0f;
+    // Springbones (hair/clothes physics)
+    bool springEnabled = true;
+    float springStiffness = 1.0f;
+    float springGravity = 1.0f;
+    // Background: 0=white 1=black 2=green (chroma key) 3=transparent
+    int bgMode = 0;
+
+    static constexpr int ROW_COUNT = 11;
+    int selected = 0;
+
+    static const char* bgModeName(int m) {
+        switch (m) {
+            case 1: return "Black";
+            case 2: return "Green (key)";
+            case 3: return "Transparent";
+            default: return "White";
+        }
+    }
+};
+
 class UIOverlay {
 public:
     bool visible = true;
     bool showCameraMenu = false;
+    bool showSettings = false;
+    SettingsState settings;
     std::string statusMessage;
     float statusTimer = 0.0f;
     uint8_t statusColor[3] = {100, 255, 120}; // Green default
 
     void toggleVisible() {
         visible = !visible;
+        // Hiding the overlay hides everything it draws, including menus.
+        if (!visible) {
+            showCameraMenu = false;
+            showSettings = false;
+        }
     }
 
     void toggleCameraMenu() {
         showCameraMenu = !showCameraMenu;
         if (showCameraMenu) visible = true;
+    }
+
+    // Settings panel: only responds while the overlay is visible, so a
+    // hidden UI ([W]) stays fully hidden.
+    void toggleSettings() {
+        if (!visible) return;
+        showSettings = !showSettings;
+    }
+
+    void moveSettingSelection(int dir) {
+        if (!showSettings) return;
+        int n = SettingsState::ROW_COUNT;
+        settings.selected = (settings.selected + dir + n) % n;
+    }
+
+    // dir: -1 (left/down), +1 (right/up)
+    void adjustSetting(int dir) {
+        if (!showSettings) return;
+        SettingsState& s = settings;
+        auto clampStep = [dir](float& v, float lo, float hi, float step) {
+            v += dir * step;
+            if (v < lo) v = lo;
+            if (v > hi) v = hi;
+        };
+        switch (s.selected) {
+            case 0: clampStep(s.headYawGain, 0.0f, 1.0f, 0.05f); break;
+            case 1: clampStep(s.headPitchGain, 0.0f, 1.0f, 0.05f); break;
+            case 2: clampStep(s.headRollGain, 0.0f, 1.0f, 0.05f); break;
+            case 3: clampStep(s.headMaxYaw, 5.0f, 90.0f, 1.0f); break;
+            case 4: clampStep(s.headMaxPitch, 5.0f, 60.0f, 1.0f); break;
+            case 5: clampStep(s.headMaxRoll, 5.0f, 45.0f, 1.0f); break;
+            case 6: clampStep(s.gazeScale, 0.0f, 2.0f, 0.1f); break;
+            case 7: s.springEnabled = !s.springEnabled; break;
+            case 8: clampStep(s.springStiffness, 0.0f, 2.0f, 0.1f); break;
+            case 9: clampStep(s.springGravity, 0.0f, 2.0f, 0.1f); break;
+            case 10: s.bgMode = (s.bgMode + (dir > 0 ? 1 : 3)) % 4; break;
+        }
     }
 
     void setStatus(const std::string& msg, float duration = 3.0f, bool isError = false) {
@@ -149,7 +226,7 @@ public:
         
         std::string camLabel = " Camera: " + activeName;
         if (camLabel.size() > 32) camLabel = camLabel.substr(0, 29) + "...";
-        std::string hudText = "[C]" + camLabel + "  |  [W] PiP/UI  [SPACE] Calib  [ESC] Quit";
+        std::string hudText = "[C]" + camLabel + "  |  [W] PiP/UI  [S] Settings  [SPACE] Calib  [ESC] Quit";
         int hudW = (int)hudText.length() * 8 + 20;
 
         // Draw HUD background & border
@@ -160,7 +237,7 @@ public:
         drawText(bgra, fbW, fbH, hudX + 10, hudY + 9, "[C]", 80, 200, 255, 255);
         drawText(bgra, fbW, fbH, hudX + 10 + 24, hudY + 9, camLabel, 240, 245, 255, 255);
         int afterCamX = hudX + 10 + 24 + (int)camLabel.length() * 8;
-        drawText(bgra, fbW, fbH, afterCamX, hudY + 9, "  |  [W] PiP/UI  [SPACE] Calib  [ESC] Quit", 160, 175, 195, 255);
+        drawText(bgra, fbW, fbH, afterCamX, hudY + 9, "  |  [W] PiP/UI  [S] Settings  [SPACE] Calib  [ESC] Quit", 160, 175, 195, 255);
 
         int currentY = hudY + hudH + 8;
 
@@ -262,9 +339,79 @@ public:
             drawLegendLine(camKeyRange, "Select active camera source");
             drawLegendLine("[R]", "Rescan connected video devices");
             drawLegendLine("[C]", "Toggle camera menu & shortcuts");
+            drawLegendLine("[S]", "Toggle settings (head/gaze/spring/bg)");
             drawLegendLine("[W]", "Toggle PiP preview & UI overlay");
             drawLegendLine("[SPACE]", "Calibrate / re-calibrate tracking pose");
+            drawLegendLine("[P]", "Save screenshot (PNG, alpha in bg=Transparent)");
             drawLegendLine("[ESC]", "Quit application");
+        }
+
+        // 5. Settings panel (when showSettings is true). Part of the overlay:
+        // hidden entirely when the [W] visibility toggle is off.
+        if (showSettings) {
+            const SettingsState& s = settings;
+            const int panelW = 470;
+            const int rowH = 24;
+            const int panelH = 34 + SettingsState::ROW_COUNT * rowH + 10;
+
+            drawBoxAlpha(bgra, fbW, fbH, hudX, currentY, panelW, panelH, 14, 18, 24, 235);
+            drawBorder(bgra, fbW, fbH, hudX, currentY, panelW, panelH, 70, 95, 130, 240);
+            drawBoxAlpha(bgra, fbW, fbH, hudX + 1, currentY + 1, panelW - 2, 28, 26, 34, 46, 250);
+            drawText(bgra, fbW, fbH, hudX + 14, currentY + 10, "SETTINGS", 80, 210, 255, 255);
+            drawText(bgra, fbW, fbH, hudX + 150, currentY + 10,
+                     "UP/DOWN select   LEFT/RIGHT adjust", 150, 165, 180, 255);
+
+            // Row descriptors: label + value text + slider fraction (-1 = none)
+            struct Row { const char* label; std::string value; float frac; };
+            auto rows = [] (const SettingsState& st) {
+                std::vector<Row> r;
+                auto f2 = [](float v) {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.2f", v);
+                    return std::string(buf);
+                };
+                r.push_back({"Head yaw gain", f2(st.headYawGain), st.headYawGain});
+                r.push_back({"Head pitch gain", f2(st.headPitchGain), st.headPitchGain});
+                r.push_back({"Head roll gain", f2(st.headRollGain), st.headRollGain});
+                r.push_back({"Head max yaw (deg)", f2(st.headMaxYaw), (st.headMaxYaw - 5) / 85.0f});
+                r.push_back({"Head max pitch (deg)", f2(st.headMaxPitch), (st.headMaxPitch - 5) / 55.0f});
+                r.push_back({"Head max roll (deg)", f2(st.headMaxRoll), (st.headMaxRoll - 5) / 40.0f});
+                r.push_back({"Gaze scale", f2(st.gazeScale), st.gazeScale / 2.0f});
+                r.push_back({"Springbones", std::string(st.springEnabled ? "ON" : "OFF"), -1.0f});
+                r.push_back({"Spring stiffness", f2(st.springStiffness), st.springStiffness / 2.0f});
+                r.push_back({"Spring gravity", f2(st.springGravity), st.springGravity / 2.0f});
+                r.push_back({"Background", SettingsState::bgModeName(st.bgMode), -1.0f});
+                return r;
+            };
+            std::vector<Row> rowList = rows(s);
+
+            int itemY = currentY + 36;
+            const int sliderX = hudX + panelW - 130;
+            const int sliderW = 110;
+            for (int i = 0; i < (int)rowList.size() && i < SettingsState::ROW_COUNT; i++) {
+                const Row& row = rowList[i];
+                bool isSel = (i == s.selected);
+                if (isSel) {
+                    drawBoxAlpha(bgra, fbW, fbH, hudX + 6, itemY, panelW - 12, rowH - 4, 30, 60, 90, 200);
+                    drawBorder(bgra, fbW, fbH, hudX + 6, itemY, panelW - 12, rowH - 4, 60, 140, 220, 200);
+                }
+                drawText(bgra, fbW, fbH, hudX + 14, itemY + 5,
+                         isSel ? "> " + std::string(row.label) : std::string("  ") + row.label,
+                         isSel ? 255 : 200, isSel ? 255 : 210, isSel ? 255 : 220, 255);
+                // Value + slider
+                drawText(bgra, fbW, fbH, hudX + 195, itemY + 5, row.value, 255, 205, 80, 255);
+                if (row.frac >= 0.0f) {
+                    drawBoxAlpha(bgra, fbW, fbH, sliderX, itemY + 8, sliderW, 6, 55, 45, 28, 255);
+                    int fillW = (int)((sliderW - 2) * row.frac);
+                    if (fillW > 0)
+                        drawBoxAlpha(bgra, fbW, fbH, sliderX + 1, itemY + 9, fillW, 4, 255, 205, 80, 255);
+                } else {
+                    // Toggle / cycle marker
+                    const char* arrows = "< >";
+                    drawText(bgra, fbW, fbH, sliderX + sliderW / 2 - 12, itemY + 5, arrows, 120, 135, 155, 255);
+                }
+                itemY += rowH;
+            }
         }
     }
 };

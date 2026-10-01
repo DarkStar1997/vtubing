@@ -48,4 +48,6 @@ public:
 private:
     MpHandLandmarkerPtr landmarker_ = nullptr;
     int64_t timestampMs_ = 0;
+    int64_t baseTs_ = -1;    // steady_clock base for real timestamps
+    int64_t lastTsMs_ = -1;  // enforce strictly increasing values
 };

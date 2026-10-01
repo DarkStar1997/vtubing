@@ -1,6 +1,7 @@
 #include "hand_tracker.h"
 #include <cstdio>
 #include <cstring>
+#include <chrono>
 #include <cstring>
 
 HandTracker::HandTracker(const std::string& modelDir) {
@@ -63,7 +64,16 @@ void HandTracker::detect(const Image& bgr, HandResult& left, HandResult& right) 
     MpHandLandmarkerResult mpResult;
     std::memset(&mpResult, 0, sizeof(mpResult));
 
-    timestampMs_ += 33;
+    // Real monotonic timestamp (ms since first call). MediaPipe VIDEO
+    // mode needs strictly increasing values that match actual frame
+    // pacing (fixed 33 ms steps degraded tracking at other frame caps).
+    int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now().time_since_epoch())
+                         .count();
+    if (baseTs_ < 0) baseTs_ = nowMs;
+    timestampMs_ = nowMs - baseTs_;
+    if (timestampMs_ <= lastTsMs_) timestampMs_ = lastTsMs_ + 1;
+    lastTsMs_ = timestampMs_;
     st = MpHandLandmarkerDetectForVideo(
         landmarker_, image, nullptr, timestampMs_, &mpResult, &errorMsg);
 
