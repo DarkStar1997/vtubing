@@ -212,6 +212,68 @@ public:
         }
     }
 
+    // Word-wrap to a character budget (8-px font), hard-capped at maxLines.
+    static std::vector<std::string> wrapText(const std::string& text, int maxChars,
+                                             int maxLines) {
+        std::vector<std::string> lines;
+        std::string cur;
+        size_t i = 0;
+        while (i < text.size()) {
+            while (i < text.size() && text[i] == ' ') i++;
+            size_t wordStart = i;
+            while (i < text.size() && text[i] != ' ') i++;
+            if (wordStart == i) break;
+            std::string word = text.substr(wordStart, i - wordStart);
+            if (!cur.empty() &&
+                (int)(cur.size() + 1 + word.size()) > maxChars) {
+                if ((int)lines.size() + 1 >= maxLines) {
+                    if (!cur.empty()) lines.push_back(cur);
+                    return lines;  // cap reached
+                }
+                lines.push_back(cur);
+                cur = word;
+            } else {
+                if (!cur.empty()) cur += ' ';
+                cur += word;
+            }
+        }
+        if (!cur.empty() && (int)lines.size() < maxLines) lines.push_back(cur);
+        return lines;
+    }
+
+    // One-line help for each settings row, shown in the panel footer.
+    static const char* describeSetting(int row) {
+        switch (row) {
+            case 0:  return "How much of your left/right head turn reaches the "
+                            "avatar. 1.0 = full mirror, lower = calmer, 0 = no turn.";
+            case 1:  return "Nod up/down scale. 1.0 = full mirror, lower = calmer.";
+            case 2:  return "Ear-to-shoulder tilt scale. 1.0 = full mirror, "
+                            "lower = calmer.";
+            case 3:  return "Hard cap on left/right rotation after gain. The head "
+                            "is a thin shell; past ~40 deg it looks inside-out.";
+            case 4:  return "Hard cap on nod up/down, applied after gain.";
+            case 5:  return "Hard cap on head tilt, applied after gain.";
+            case 6:  return "0 = snappy but tracker jitter passes through; 1 = "
+                            "very steady with slight lag. Raise it if the webcam "
+                            "is noisy or you sit far away.";
+            case 7:  return "Same for arms, spine and lean from pose estimation. "
+                            "Brief detection dropouts (<0.35 s) are bridged "
+                            "automatically.";
+            case 8:  return "Eye-gaze strength via the model's lookAt maps. "
+                            "0 = stare ahead; above 1 = livelier eye darts.";
+            case 9:  return "Hair/clothes physics master switch. OFF = hair glued "
+                            "to the head, lowest CPU.";
+            case 10: return "How strongly strands spring back to rest. 0 = floppy, "
+                            "2 = stiff snap-back.";
+            case 11: return "Downward sag of hair/clothes. 0 = weightless, "
+                            "2 = heavy droop.";
+            case 12: return "Transparent = alpha PNG screenshots (checkerboard "
+                            "on screen), green = chroma key for OBS, white/black "
+                            "= solid fill.";
+        }
+        return "";
+    }
+
     void render(uint8_t* bgra, int fbW, int fbH, const std::vector<CameraDeviceInfo>& cameras, SDL_CameraID activeDevId, const std::string& activeName, const HUDState& hud) {
         if (!visible) return;
 
@@ -359,7 +421,10 @@ public:
             const SettingsState& st = settings;
             const int panelW = 470;
             const int rowH = 24;
-            const int panelH = 34 + SettingsState::ROW_COUNT * rowH + 10;
+            // Fixed footer reserve (separator + up to 3 wrapped help lines)
+            // so the panel height never jumps as the selection moves.
+            const int helpH = 46;
+            const int panelH = 34 + SettingsState::ROW_COUNT * rowH + helpH + 6;
 
             drawBoxAlpha(bgra, fbW, fbH, hudX, currentY, panelW, panelH, 14, 18, 24, 235);
             drawBorder(bgra, fbW, fbH, hudX, currentY, panelW, panelH, 70, 95, 130, 240);
@@ -420,6 +485,23 @@ public:
                     drawText(bgra, fbW, fbH, sliderX + sliderW / 2 - 12, itemY + 5, arrows, 120, 135, 155, 255);
                 }
                 itemY += rowH;
+            }
+
+            // Contextual help footer: describes the selected row only,
+            // so the panel stays uncluttered.
+            {
+                int helpY = currentY + 34 + SettingsState::ROW_COUNT * rowH;
+                drawBoxAlpha(bgra, fbW, fbH, hudX + 6, helpY, panelW - 12,
+                             helpH, 10, 14, 20, 210);
+                drawBorder(bgra, fbW, fbH, hudX + 6, helpY, panelW - 12,
+                           helpH, 45, 60, 80, 190);
+                const int maxChars = (panelW - 12 - 20) / 8;
+                auto lines = wrapText(describeSetting(st.selected), maxChars, 3);
+                int ly = helpY + 6;
+                for (const auto& ln : lines) {
+                    drawText(bgra, fbW, fbH, hudX + 16, ly, ln, 165, 195, 225, 255);
+                    ly += 11;
+                }
             }
         }
     }
