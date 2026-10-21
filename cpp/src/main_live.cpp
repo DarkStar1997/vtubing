@@ -292,6 +292,68 @@ int main(int argc, char** argv) {
     HandTracker handTracker(modelDir);
     RigSolver rigSolver(model);
     SpringBoneSolver springSolver(model);
+    // Skirt/leg sync bones + segment subdivision (deejay ports):
+    // spring chains rooted BELOW the hips are skirt/leg-adjacent
+    // panels (hair is above the head, sleeves root under arms).
+    // Free-hanging ones follow the nearest thigh at half weight so
+    // the skirt tracks leg motion instead of lagging into the legs;
+    // ALL of them get subdivided segments - skirt panels are commonly
+    // single-bone planks whose chord cuts through the thigh colliders
+    // their tail is pushed out of (the virtual mid-joint lets the
+    // colliders wrap them). Chains already parented under a thigh
+    // follow the leg rigidly and only need the subdivision.
+    {
+        std::vector<SpringBoneSolver::SyncBone> sync;
+        std::vector<int> subdiv;
+        auto bn = [&](const char* n) {
+            auto it = model.boneNodes.find(n);
+            return it == model.boneNodes.end() ? -1 : it->second;
+        };
+        const int hips = bn("hips");
+        const int thighs[2] = {bn("leftUpperLeg"), bn("rightUpperLeg")};
+        if (hips >= 0 && hips < (int)bindWorldMatrices.size() &&
+            thighs[0] >= 0 && thighs[1] >= 0 &&
+            thighs[0] < (int)bindWorldMatrices.size() &&
+            thighs[1] < (int)bindWorldMatrices.size()) {
+            const float hipsY = bindWorldMatrices[hips][3].y;
+            auto underThigh = [&](int node) {
+                while (node >= 0 && node != hips) {
+                    for (int t : thighs)
+                        if (node == t) return true;
+                    node = node < (int)model.nodes.size()
+                               ? model.nodes[node].parent
+                               : -1;
+                }
+                return false;
+            };
+            for (const auto& sc : model.springChains) {
+                if (sc.joints.empty()) continue;
+                const int root = sc.joints[0];
+                if (root < 0 || root >= (int)bindWorldMatrices.size())
+                    continue;
+                if (bindWorldMatrices[root][3].y > hipsY - 0.02f) continue;
+                subdiv.push_back(root);
+                if (underThigh(root)) continue;
+                int src = -1;
+                float best = 1e9f;
+                for (int t : thighs) {
+                    if (t < 0 || t >= (int)bindWorldMatrices.size()) continue;
+                    const float dx =
+                        bindWorldMatrices[root][3].x - bindWorldMatrices[t][3].x;
+                    const float dz =
+                        bindWorldMatrices[root][3].z - bindWorldMatrices[t][3].z;
+                    const float d = dx * dx + dz * dz;
+                    if (d < best) {
+                        best = d;
+                        src = t;
+                    }
+                }
+                if (src >= 0) sync.push_back({root, src, 0.5f});
+            }
+        }
+        springSolver.setSyncBones(std::move(sync));
+        springSolver.setSubdivideRoots(std::move(subdiv));
+    }
     if (!springSolver.empty())
         VLOG("[live] %d springbone chains, lookAt=%s\n",
              (int)model.springChains.size(), model.lookAt.type.c_str());
