@@ -651,6 +651,404 @@ int main() {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Proportional palm orientation (deejay port): the avatar hand's
+    // orientation must follow (1:1) the tracked palm frame - finger
+    // direction AND palm normal riding the animated forearm - instead
+    // of the old X-only palm twist, which could not represent a
+    // droop/radial-tilt at all. Left hand drooping 30 deg off the
+    // forearm toward the model front must reproduce the same droop.
+    {
+        // Minimal skeleton rig: hips -> leftUpperArm -> leftLowerArm
+        // -> leftHand -> finger line (T-pose along +x, identity
+        // rotations): fingerDir = +x, across (index-little) = +z,
+        // palm normal = -y, lowerArm->hand = +x (REST_L space). The
+        // mirrored rightUpperArm lets the ctor's ikBasis capture run;
+        // for this standard T-pose it lands on the default basis
+        // {(1,0,0),(0,-1,0),(0,0,-1)}, i.e. toModelSpace = (x,-y,-z).
+        VRMModel m;
+        m.nodes.resize(9);
+        m.nodes[0].name = "hips";
+        m.nodes[1].name = "leftUpperArm";  m.nodes[1].parent = 0;
+        m.nodes[1].translation = {0.05f, 0.45f, 0.0f};
+        m.nodes[2].name = "leftLowerArm";  m.nodes[2].parent = 1;
+        m.nodes[2].translation = {0.19f, 0.0f, 0.0f};
+        m.nodes[3].name = "leftHand";      m.nodes[3].parent = 2;
+        m.nodes[3].translation = {0.17f, 0.0f, 0.0f};
+        m.nodes[4].name = "leftMiddleProximal";  m.nodes[4].parent = 3;
+        m.nodes[4].translation = {0.07f, 0.0f, 0.0f};
+        m.nodes[5].name = "leftIndexProximal";   m.nodes[5].parent = 3;
+        m.nodes[5].translation = {0.02f, 0.0f, 0.025f};
+        m.nodes[6].name = "leftLittleProximal";  m.nodes[6].parent = 3;
+        m.nodes[6].translation = {0.02f, 0.0f, -0.025f};
+        m.nodes[7].name = "rightHand";     m.nodes[7].parent = 0;
+        m.nodes[8].name = "rightUpperArm"; m.nodes[8].parent = 0;
+        m.nodes[8].translation = {-0.05f, 0.45f, 0.0f};
+        for (size_t i = 0; i < m.nodes.size(); i++)
+            m.boneNodes[m.nodes[i].name] = (int)i;
+
+        RigSolver solver(m);
+        solver.startCalibration();
+        FaceResult nf = makeFace({});
+        for (int i = 0; i < 35; i++) solver.calibrate(nf);
+        solver.calibratePose();
+
+        const float dt = 1.0f / 15.0f;
+        // Pose: arm straight out along the bind direction (+x), so
+        // the animated forearm axis fA1 is exactly +x and the ride
+        // rotation is identity - the emitted frame then equals the
+        // tracked frame mapped through the captured basis alone.
+        // Hips hidden afterwards so the solver stays in the sitting
+        // mode where hand tracking runs.
+        const glm::vec3 armRaw = glm::normalize(glm::vec3(1.0f, 0.0f, 0.0f));
+        PoseResult pr = makePose(armRaw, armRaw, armRaw, armRaw);
+        pr.landmarks[PoseLandmarkIdx::L_HIP * 5 + 3] = 0.0f;
+        pr.landmarks[PoseLandmarkIdx::R_HIP * 5 + 3] = 0.0f;
+
+        // Tracked hand frame in SOLVER landmark space: fingers droop
+        // 30 deg off the forearm (+x) toward solver +z, index side
+        // toward solver -y. emitHandOrientation maps it through
+        // toModelSpace = (x,-y,-z) for this rig, so the expected
+        // model-space frame is the y/z-mirrored one below.
+        const float kDrop = glm::radians(30.0f);
+        const glm::vec3 dS(std::cos(kDrop), 0.0f, std::sin(kDrop));
+        const glm::vec3 aS(0.0f, -1.0f, 0.0f);
+        const glm::vec3 nS = glm::normalize(glm::cross(dS, aS));
+        const glm::vec3 dM(dS.x, -dS.y, -dS.z);
+        const glm::vec3 aM(aS.x, -aS.y, -aS.z);
+        const glm::vec3 nM(nS.x, -nS.y, -nS.z);
+
+        HandResult lh;
+        lh.detected = true;
+        auto setHl = [&](int i, const glm::vec3& solverSpace) {
+            // Raw -> solver is the AXIS_FLIP z flip.
+            lh.worldLandmarks[i * 3 + 0] = solverSpace.x;
+            lh.worldLandmarks[i * 3 + 1] = solverSpace.y;
+            lh.worldLandmarks[i * 3 + 2] = -solverSpace.z;
+        };
+        setHl(HandLandmarkIdx::WRIST, glm::vec3(0.0f));
+        setHl(HandLandmarkIdx::MIDDLE_MCP, dS * 0.09f);
+        setHl(HandLandmarkIdx::INDEX_MCP, dS * 0.085f + aS * 0.04f);
+        setHl(HandLandmarkIdx::LITTLE_MCP, dS * 0.085f - aS * 0.04f);
+        HandResult none;
+
+        for (int i = 0; i < 60; i++) {
+            solver.updatePose(pr, dt);
+            solver.updateHands(lh, none, dt);
+        }
+
+        const int handNode = m.boneNodes["leftHand"];
+        auto hov = solver.handOverrides().find(handNode);
+        CHECK(hov != solver.handOverrides().end(),
+              "tracked hand drives the hand-bone override");
+        if (hov != solver.handOverrides().end()) {
+            const BodyPose& bp = solver.bodyPose();
+            const glm::quat laW = bp.leftUpperArm * bp.leftLowerArm;
+            const glm::quat handW = laW * hov->second;
+            const glm::vec3 fingerW = handW * glm::vec3(1, 0, 0);
+            const glm::vec3 forearmW = laW * glm::vec3(1, 0, 0);
+            auto angBetween = [](const glm::vec3& a, const glm::vec3& b) {
+                return std::acos(glm::clamp(
+                    glm::dot(glm::normalize(a), glm::normalize(b)),
+                    -1.0f, 1.0f));
+            };
+            const float droop = glm::degrees(angBetween(fingerW, forearmW));
+            CHECK(droop > 20.0f && droop < 40.0f,
+                  "hand droop transfers 1:1 (~30 deg) - proportional");
+            // Palm and index sides follow the tracked frame MAPPED
+            // THROUGH THE BIND BASIS - without toModelSpace the frame
+            // is mirrored in y/z and the palm renders canted or
+            // facing backward.
+            const glm::vec3 palmW = handW * glm::vec3(0, -1, 0);
+            CHECK(glm::dot(glm::normalize(palmW), nM) > 0.8f,
+                  "palm normal follows the tracked palm (bind-basis mapped)");
+            const glm::vec3 acrossW = handW * glm::vec3(0, 0, 1);
+            CHECK(glm::dot(glm::normalize(acrossW), aM) > 0.85f,
+                  "index side maps to the tracked index side (bind-basis mapped)");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Finger glide + hand-presence hysteresis + handedness gate
+    // (deejay ports). Rig: leftHand (3) with the 15 finger joints the
+    // ctor resolves by name.
+    {
+        VRMModel m;
+        m.nodes.resize(19);
+        m.nodes[0].name = "root";
+        m.nodes[3].name = "leftHand";
+        m.nodes[3].parent = 0;
+        static const char* kFing[5] = {"Thumb", "Index", "Middle",
+                                       "Ring", "Little"};
+        static const char* kJt[2][3] = {
+            {"Metacarpal", "Proximal", "Distal"},          // thumb
+            {"Proximal", "Intermediate", "Distal"},        // others
+        };
+        int n = 4;
+        for (int f = 0; f < 5; f++)
+            for (int j = 0; j < 3; j++) {
+                std::string name =
+                    std::string("left") + kFing[f] + kJt[f == 0 ? 0 : 1][j];
+                m.nodes[n].name = name;
+                m.nodes[n].parent = 3;
+                m.boneNodes[name] = n++;
+            }
+        const int prox = m.boneNodes["leftIndexProximal"];
+
+        RigSolver solver(m);
+        const float dt = 1.0f / 15.0f;
+
+        // Fully curled left hand (world landmarks, raw MP space):
+        // every finger segment bends ~110 deg.
+        HandResult hand;
+        hand.detected = true;
+        for (int f = 0; f < 5; f++) {
+            int base = f * 4 + 1;
+            float px = 0.04f, py = 0.0f, pz = 0.0f;
+            float ang = 0.0f;
+            for (int j = 0; j < 4; j++) {
+                hand.worldLandmarks[(base + j) * 3 + 0] = px;
+                hand.worldLandmarks[(base + j) * 3 + 1] = py;
+                hand.worldLandmarks[(base + j) * 3 + 2] = pz;
+                ang += glm::radians(110.0f);
+                px += 0.03f * std::cos(ang);
+                py += 0.03f * std::sin(ang);
+                pz += 0.0f;
+            }
+        }
+        HandResult none;
+
+        // Acquire and converge the glide onto the curled target.
+        for (int i = 0; i < 40; i++) solver.updateHands(hand, none, dt);
+        auto it = solver.handOverrides().find(prox);
+        CHECK(it != solver.handOverrides().end(),
+              "tracked index finger drives an override");
+        const float full = glm::degrees(glm::angle(it->second));
+        CHECK(full > 45.0f, "hard curl reads as a large rotation");
+
+        // Glide on loss: the override eases back to bind — never a
+        // single-frame snap — and eventually releases.
+        float prev = full, maxStep = 0.0f;
+        bool released = false;
+        for (int i = 0; i < 90; i++) {
+            solver.updateHands(none, none, dt);
+            auto it2 = solver.handOverrides().find(prox);
+            if (it2 == solver.handOverrides().end()) {
+                released = true;
+                break;
+            }
+            float a = glm::degrees(glm::angle(it2->second));
+            maxStep = std::max(maxStep, std::abs(a - prev));
+            prev = a;
+        }
+        CHECK(released, "lost finger releases back to bind");
+        CHECK(maxStep <= 45.0f,
+              "no snap on loss (max per-frame step <= 45 deg)");
+
+        // Re-acquire: the presence gate needs 2 consecutive
+        // detections; after confirmation the value eases in below the
+        // full target.
+        solver.updateHands(hand, none, dt);  // confirmation frame
+        solver.updateHands(hand, none, dt);
+        auto it3 = solver.handOverrides().find(prox);
+        CHECK(it3 != solver.handOverrides().end() &&
+                  glm::degrees(glm::angle(it3->second)) < full * 0.9f,
+              "re-acquire eases in (first frames below target)");
+
+        // Flapping detection: during the hold window the output must
+        // stay CONSTANT - previously every dropout eased the fingers
+        // toward bind and every redetection snapped back (continuous
+        // twitching while the palm was intermittently detected).
+        for (int i = 0; i < 20; i++)
+            solver.updateHands(hand, none, dt);  // re-converge fully
+        float prevA = 0.0f, maxFlapStep = 0.0f;
+        bool presentThroughout = true;
+        {
+            auto it0 = solver.handOverrides().find(prox);
+            prevA = it0 == solver.handOverrides().end()
+                        ? 0.0f
+                        : glm::degrees(glm::angle(it0->second));
+        }
+        for (int i = 0; i < 30; i++) {
+            solver.updateHands(i % 2 == 0 ? none : hand, none, dt);
+            auto itF = solver.handOverrides().find(prox);
+            if (itF == solver.handOverrides().end()) {
+                presentThroughout = false;
+                continue;
+            }
+            const float a = glm::degrees(glm::angle(itF->second));
+            maxFlapStep = std::max(maxFlapStep, std::abs(a - prevA));
+            prevA = a;
+        }
+        CHECK(presentThroughout,
+              "flapping detection never drops the finger override");
+        CHECK(maxFlapStep < 2.0f,
+              "held hand stays steady through flapping detection");
+
+        // Sustained loss past the hold window: release, then STAY
+        // released - steady, nothing re-appearing.
+        bool released2 = false;
+        for (int i = 0; i < 60; i++) {
+            solver.updateHands(none, none, dt);
+            if (solver.handOverrides().find(prox) ==
+                solver.handOverrides().end()) {
+                released2 = true;
+                break;
+            }
+        }
+        CHECK(released2,
+              "sustained loss releases the hand (past the hold window)");
+        solver.updateHands(none, none, dt);
+        CHECK(solver.handOverrides().find(prox) ==
+                  solver.handOverrides().end(),
+              "released hand stays released (steady rest)");
+
+        // Finger jitter smoothing (vtubing tuning, not a deejay
+        // port): mask/ROI flutter lands as per-frame landmark noise;
+        // the driven curls must not reproduce it frame to frame.
+        {
+            for (int i = 0; i < 20; i++)
+                solver.updateHands(hand, none, dt);  // re-converge
+            // Alternating +/-5 mm out-of-plane jitter on the index
+            // PIP landmark wobbles the two adjacent joint angles by
+            // ~9-10 deg at 7.5 Hz (15 fps / 2) - squarely in the
+            // landmark-jitter band the filters must drop.
+            HandResult hi = hand, lo = hand;
+            hi.worldLandmarks[HandLandmarkIdx::INDEX_PIP * 3 + 2] += 0.005f;
+            lo.worldLandmarks[HandLandmarkIdx::INDEX_PIP * 3 + 2] -= 0.005f;
+            float prevA = 0.0f, maxStep = 0.0f;
+            bool have = false;
+            for (int i = 0; i < 30; i++) {
+                solver.updateHands(i % 2 == 0 ? hi : lo, none, dt);
+                auto it = solver.handOverrides().find(prox);
+                if (it == solver.handOverrides().end()) continue;
+                const float a = glm::degrees(glm::angle(it->second));
+                if (have && i >= 8)
+                    maxStep = std::max(maxStep, std::abs(a - prevA));
+                prevA = a;
+                have = true;
+            }
+            CHECK(maxStep < 3.5f,
+                  "landmark jitter is filtered out of finger curls");
+        }
+
+        // Hold window: 0.4 s of detection loss still holds the hand
+        // (bridges the common mask-flutter gap lengths); past ~0.5 s
+        // it releases.
+        {
+            for (int i = 0; i < 20; i++)
+                solver.updateHands(hand, none, dt);  // re-converge
+            for (int i = 0; i < 6; i++) solver.updateHands(none, none, dt);
+            CHECK(solver.handOverrides().find(prox) !=
+                      solver.handOverrides().end(),
+                  "0.4 s loss still holds the hand targets");
+            bool releasedHold = false;
+            for (int i = 0; i < 25; i++) {
+                solver.updateHands(none, none, dt);
+                if (solver.handOverrides().find(prox) ==
+                    solver.handOverrides().end()) {
+                    releasedHold = true;
+                    break;
+                }
+            }
+            CHECK(releasedHold, "sustained loss past 0.5 s releases the hand");
+        }
+
+        // Handedness persistence gate truth table.
+        {
+            HandResult a, b;
+            a.detected = b.detected = true;
+            auto setWx = [](HandResult& h, float x) {
+                h.worldLandmarks[0] = x;
+                h.worldLandmarks[1] = -0.1f;
+                h.worldLandmarks[2] = -0.2f;
+            };
+            setWx(a, 0.30f);
+            setWx(b, -0.30f);
+            solver.updateHands(a, b, dt);
+            CHECK(!solver.handSideSwapped(),
+                  "correctly-labeled hands do not swap");
+            setWx(a, -0.30f);
+            setWx(b, 0.30f);
+            solver.updateHands(a, b, dt);
+            CHECK(!solver.handSideSwapped(),
+                  "swap needs persistence (1 frame is not enough)");
+            solver.updateHands(a, b, dt);
+            CHECK(solver.handSideSwapped(),
+                  "persistent swapped labels swap the streams");
+            setWx(a, -0.06f);
+            setWx(b, 0.06f);
+            solver.updateHands(a, b, dt);
+            CHECK(!solver.handSideSwapped(),
+                  "close wrists (real weave) never swap");
+            setWx(a, 0.30f);
+            setWx(b, -0.30f);
+            solver.updateHands(a, b, dt);
+            CHECK(!solver.handSideSwapped(),
+                  "correct labels clear the swap state");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Standing relaxed rest pose (deejay port): straight bind fingers
+    // read as "mannequin hands"; the standing rest is a ~20-deg/joint
+    // curl with the thumb inline plus a light curl.
+    {
+        VRMModel m;
+        m.nodes.resize(19);
+        m.nodes[0].name = "root";
+        m.nodes[3].name = "leftHand";
+        m.nodes[3].parent = 0;
+        static const char* kFing[5] = {"Thumb", "Index", "Middle",
+                                       "Ring", "Little"};
+        static const char* kJt[2][3] = {
+            {"Metacarpal", "Proximal", "Distal"},
+            {"Proximal", "Intermediate", "Distal"},
+        };
+        int n = 4;
+        for (int f = 0; f < 5; f++)
+            for (int j = 0; j < 3; j++) {
+                std::string name =
+                    std::string("left") + kFing[f] + kJt[f == 0 ? 0 : 1][j];
+                m.nodes[n].name = name;
+                m.nodes[n].parent = 3;
+                m.boneNodes[name] = n++;
+            }
+        RigSolver solver(m);
+        solver.startCalibration();
+        for (int i = 0; i < 35; i++) solver.calibrate(makeFace({}));
+        solver.calibratePose();
+
+        // Standing figure: makePose keeps the hips visible, which
+        // drives the standing detector.
+        const float dt = 1.0f / 15.0f;
+        const glm::vec3 down = glm::normalize(glm::vec3(0.0f, -1.0f, 0.0f));
+        PoseResult stand = makePose(down, down, down, down);
+        for (int i = 0; i < 90 && solver.bodyPose().standing <= 0.5f; i++)
+            solver.updatePose(stand, dt);
+        CHECK(solver.bodyPose().standing > 0.5f, "standing pose detected");
+
+        HandResult none;
+        for (int i = 0; i < 60; i++) solver.updateHands(none, none, dt);
+        const auto& ov = solver.handOverrides();
+        static const char* kRestNodes[4] = {
+            "leftMiddleProximal", "leftIndexProximal",
+            "leftLittleProximal", "leftMiddleDistal"};
+        int curled = 0;
+        for (int i = 0; i < 4; i++) {
+            auto it = ov.find(m.boneNodes[kRestNodes[i]]);
+            if (it == ov.end()) continue;
+            const float a = glm::angle(it->second);
+            const glm::vec3 ax = glm::axis(it->second);
+            if (std::abs(a - glm::radians(20.0f)) < 0.06f &&
+                std::abs(ax.z) > 0.99f)
+                curled++;
+        }
+        CHECK(curled == 4,
+              "standing rest curls every finger joint ~20 deg "
+              "(no mannequin hands)");
+    }
+
     printf("\n%s: %d failure(s)\n", g_failures ? "FAILURES" : "ALL OK", g_failures);
     return g_failures;
 }

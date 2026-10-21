@@ -43,6 +43,8 @@ public:
     glm::quat headRotation() const { return headRot_; }
     const BodyPose& bodyPose() const { return bodyPose_; }
     const std::unordered_map<int, glm::quat>& handOverrides() const { return handOverrides_; }
+    // Live state of the handedness persistence gate (tests/diagnostics).
+    bool handSideSwapped() const { return handSideSwapped_; }
 
     // Eye gaze: local rotation delta for the leftEye/rightEye bones
     // (bone-type lookAt models). Degrees are exposed for the HUD.
@@ -135,6 +137,89 @@ private:
     std::unordered_map<int, glm::quat> lastGoodHandOverrides_;
     float handTwistNeutral_[2] = {0, 0};
     bool handsCalibrated_ = false;
+
+    // Proportional palm orientation (ported from deejay): the full
+    // palm frame from hand world landmarks - finger direction +
+    // palm normal riding the ANIMATED forearm - replaces the X-only
+    // asin twist wherever the rig exposes the finger-line nodes, so
+    // the avatar hand's orientation matches (is proportional to) the
+    // tracked hand instead of approximating it by palm-normal tilt.
+    // Bind frame captured from the rig at construction:
+    struct HandBind {
+        int node = -1;                     // hand bone node
+        glm::quat bindLocal{1, 0, 0, 0};   // node's glTF bind local
+        glm::vec3 fingerDir{1, 0, 0};      // MODEL space, hand->middleProx
+        glm::vec3 normalDir{0, 0, 1};      // MODEL space, palm normal
+        glm::vec3 lowerLocal{0, -1, 0};    // LOCAL, lowerArm->hand dir
+        bool orient = false;               // full-frame orient available
+    };
+    HandBind handBinds_[2];
+    // Per-frame stashes from updatePose: the user's forearm direction
+    // (world landmarks, AXIS_FLIP'd = model space) and the avatar's
+    // animated forearm world rotation the palm frame rides on.
+    glm::vec3 poseWristU_[2]{};
+    glm::vec3 poseElbowU_[2]{};
+    glm::quat lowerArmWorldW_[2]{glm::quat(1, 0, 0, 0),
+                                 glm::quat(1, 0, 0, 0)};
+    // The palm delta is a low-frequency signal measured through noisy
+    // hand landmarks; OneEuro on its axis-angle components keeps
+    // tracker jitter out of the hand bone (per side; tuned in the
+    // ctor - arrays of non-aggregates resist brace-initialization).
+    OneEuroFilter palmRotFilters_[2][3];
+    // Finger curl smoothing (vtubing-specific, not a deejay port): at
+    // desk distance the hand landmarker's landmark jitter lands
+    // directly in the per-joint curl angles - raw angles read as
+    // constant micro-twitching whenever the hand mask/ROI fluctuates.
+    // OneEuro per (side, finger, joint) scalar: a ~1.5 Hz cutoff
+    // keeps deliberate curls natural and drops the jitter band.
+    // Reset on hand release (same rationale as the palm filters).
+    OneEuroFilter fingerFilters_[2][5][3];
+    // Solver-landmark -> model-space direction basis (deejay port):
+    // the solver's landmark space (y down, subject-left +x) is how
+    // the rigger's bind bone frames line up - VRoid-style rigs are
+    // 180 deg rotated about Z vs the model, naive test rigs are not.
+    // Recovered from the skeleton in the ctor: avatar-left along the
+    // shoulder line, spine-down from hips to chest, cross for the
+    // third axis (eye positions pin its sign to the face side).
+    // Without this the tracked palm frame is interpreted in the
+    // wrong basis - mirrored in y/z - and the palm reads as canted
+    // or facing backward.
+    glm::vec3 ikBasis_[3] = {{1.0f, 0.0f, 0.0f},
+                             {0.0f, -1.0f, 0.0f},
+                             {0.0f, 0.0f, -1.0f}};
+    glm::vec3 toModelSpace(const glm::vec3& v) const {
+        return ikBasis_[0] * v.x + ikBasis_[1] * v.y + ikBasis_[2] * v.z;
+    }
+    void emitHandOrientation(int side, const HandResult& hr, float dt);
+
+    // Handedness persistence gate (deejay port): the hand landmarker
+    // labels each detection independently, so a hand crossing the
+    // body midline can come back with its label swapped. Truth looks
+    // like this only when BOTH results sit strictly on their wrong
+    // sides with the wrists clearly separated. handSideSwapped_()
+    // reports the live gate state (tests + diagnostics).
+    int handSideSwapHold_ = 0;
+    bool handSideSwapped_ = false;
+    // Hand-presence hysteresis (deejay port, vtubing tuning): at
+    // typical desk distance the hand landmarker flaps in/out frame
+    // to frame. Every dropout released the palm override toward bind
+    // and every redetection re-acquired fast, so an
+    // intermittently-detected palm twitched continuously.
+    // (Re)acquisition needs 2 consecutive detections; after a loss
+    // the last good targets are HELD for kHandHoldSec (constant
+    // output - steady hands; 0.5 s bridges the common mask-flutter
+    // gap lengths), then released to the natural rest state, which
+    // stays constant too.
+    static constexpr float kHandHoldSec = 0.5f;
+    bool handActive_[2] = {false, false};
+    int handHitStreak_[2] = {0, 0};
+    float handLostSec_[2] = {0.0f, 0.0f};
+    std::unordered_map<int, glm::quat> heldHandTargets_[2];
+    // Finger glide-on-loss (deejay port): last OUTPUT overrides
+    // (post-glide). Newly tracked targets ease in from here (~50 ms),
+    // freshly lost nodes ease back toward bind (~120 ms) instead of
+    // snapping.
+    std::unordered_map<int, glm::quat> handGlideOut_;
 
     // 52 ARKit blendshape names (lowercased) matching VRM group names
     static constexpr const char* kArkitNames[52] = {
